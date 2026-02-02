@@ -103,99 +103,66 @@ def render_wizard():
             except: pass
         return f"{mode.capitalize()}ed text to {count} captions."
 
-    def on_sam_image_change(path):
-        if not path:
-            return None, None, [], [], "Select an image."
+    def run_birefnet_action(image_path):
+        if not image_path:
+            return None, "No image selected."
         
         try:
-            # Load image for display
-            img = Image.open(path).convert("RGB")
-            img = ImageOps.exif_transpose(img)
-            
-            # Initialize/Update Segmenter
-            # Note: We don't block UI here, but computation happens. 
-            # ideally we'd use a generator or progress, but keeping it simple for now.
             seg = get_segmenter()
-            seg.set_image(path)
-            
-            return img, None, [], [], "Image loaded. Click to segment."
+            mask = seg.segment(image_path)
+            # Create a black background image to show the mask clearly if needed, 
+            # but returning the mask directly (L mode or RGB) is usually fine for gr.Image
+            return mask, "Auto-mask generated."
         except Exception as e:
-            print(f"SAM Load Error: {e}")
-            return None, None, [], [], f"Error: {e}"
+            return None, f"BiRefNet Error: {e}"
 
-    def on_sam_click(image_path, points, labels, bg_mode_active, evt: gr.SelectData):
-        if not image_path: return None, points, labels, "No image selected."
+    def run_transparent_action(image_path):
+        if not image_path:
+            return None, "No image selected."
         
-        x, y = evt.index
-        label = 0 if bg_mode_active else 1
-        
-        new_points = points + [[x, y]]
-        new_labels = labels + [label]
-        
-        seg = get_segmenter()
         try:
-            mask = seg.segment_from_points(new_points, new_labels)
-            
-            # Create overlay for preview (optional, or just show mask)
-            # For now, just return the mask. 
-            # Ideally we might want to overlay it on the original image in the UI, 
-            # but returning it to a separate Image component is easier.
-            
-            status = f"Points: {len(new_points)} ({sum(new_labels)} FG, {len(new_labels)-sum(new_labels)} BG)"
-            return mask, new_points, new_labels, status
+            seg = get_segmenter()
+            # return_transparent=True is the new argument we added to core/segmentation.py
+            img = seg.segment(image_path, return_transparent=True)
+            return img, "Transparent image generated."
         except Exception as e:
-            return None, points, labels, f"Segmentation Error: {e}"
+            return None, f"BiRefNet Error: {e}"
 
-    def on_sam_undo(image_path, points, labels):
-        if not points: return None, points, labels, "Nothing to undo."
-        
-        new_points = points[:-1]
-        new_labels = labels[:-1]
-        
-        seg = get_segmenter()
-        mask = None
-        status = "Cleared."
-        
-        if new_points:
-            try:
-                mask = seg.segment_from_points(new_points, new_labels)
-                status = f"Points: {len(new_points)}"
-            except Exception as e:
-                status = f"Error: {e}"
-        else:
-            status = "Reset."
-            
-        return mask, new_points, new_labels, status
+    def on_image_change(path):
+        if not path:
+            return None, None, "Select an image."
+        return None, None, "Image loaded. Ready to process."
 
-    def on_sam_reset():
-        return None, [], [], "Reset."
-
-    def on_sam_unload():
+    def on_unload_model():
         seg = get_segmenter()
         seg.unload_model()
-        return None, [], [], "Model unloaded from VRAM."
+        return None, None, "Model unloaded from VRAM."
 
-    def on_sam_save(image_path, mask_image):
-        if not image_path or mask_image is None:
-            return "No mask to save."
+    def on_save_result(image_path, result_image, is_mask):
+        if not image_path or result_image is None:
+            return "No image to save."
         
         try:
-            mask_dir = os.path.join(os.path.dirname(image_path), "masks")
-            os.makedirs(mask_dir, exist_ok=True)
-            mask_name = os.path.basename(image_path).rsplit('.', 1)[0] + ".png"
-            mask_path = os.path.join(mask_dir, mask_name)
+            # Determine folder and filename
+            suffix = "_mask.png" if is_mask else "_transparent.png"
+            subfolder = "masks" if is_mask else "transparent"
             
-            mask_image.save(mask_path)
-            global_state.masks[image_path] = mask_path
-            return f"Saved mask to {mask_name}"
+            output_dir = os.path.join(os.path.dirname(image_path), subfolder)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            base_name = os.path.basename(image_path).rsplit('.', 1)[0]
+            filename = base_name + suffix
+            save_path = os.path.join(output_dir, filename)
+            
+            result_image.save(save_path)
+            
+            # Register in state if it's a mask
+            if is_mask:
+                global_state.masks[image_path] = save_path
+                
+            return f"Saved to {subfolder}/{filename}"
         except Exception as e:
             return f"Save Error: {e}"
-
-    def on_toggle_mode(is_bg):
-        # Toggle boolean
-        new_mode = not is_bg
-        btn_label = "🚫 Switch to Foreground Mode" if new_mode else "🎯 Switch to Background Mode"
-        return new_mode, btn_label
 
     # --- UI LAYOUT ---
     
@@ -255,28 +222,39 @@ def render_wizard():
 
             # STEP 4
             with gr.TabItem("Step 4: Image Tools", id=3) as tab_step_4:
-                gr.Markdown("## Step 4: Masking (SAM 2.1)")
-                img_selector = gr.Dropdown(label="Select Image to Edit")
+                gr.Markdown("## Step 4: Masking & Image Tools")
+                
+                with gr.Accordion("ℹ️ When to use Masks?", open=False):
+                    gr.Markdown("""
+                    ### Training with Masks
+                    Masks are used to tell the training script which parts of the image are important.
+                    
+                    *   **LoRAs**: Masks are often optional but highly recommended if you want the model to focus strictly on a subject.
+                    *   **Full Fine Tune**: Masks are critical to prevent 'background bleeding'.
+                    
+                    **BiRefNet** is used to automatically detect the subject and generate high-quality masks or transparent images.
+                    """)
+
+                with gr.Row():
+                    img_selector = gr.Dropdown(label="Select Image to Edit", scale=2)
                 
                 with gr.Row():
-                    # Interactive image for clicking
-                    sam_input_image = gr.Image(label="Click Object to Mask", type="filepath", interactive=True)
-                    # Mask output preview
-                    sam_mask_output = gr.Image(label="Generated Mask", type="pil", interactive=False)
-                
-                with gr.Row():
-                    mode_toggle_btn = gr.Button("🎯 Switch to Background Mode")
-                    undo_btn = gr.Button("Undo Last Point")
-                    reset_btn = gr.Button("Reset All")
-                    unload_btn = gr.Button("🗑️ Unload Model")
-                    save_mask_btn = gr.Button("Save Mask", variant="primary")
-                
-                tool_status = gr.Textbox(label="Status", value="Ready.")
-                
-                # State for SAM
-                points_state = gr.State([])
-                labels_state = gr.State([])
-                bg_mode_state = gr.State(False) # False = Foreground, True = Background
+                    # Left: Controls
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Actions")
+                        birefnet_btn = gr.Button("Generate Mask", variant="primary")
+                        transparent_btn = gr.Button("Generate Transparent Image")
+                        unload_btn = gr.Button("🗑️ Unload Model")
+                        
+                        gr.Markdown("### Save Result")
+                        # Hidden state to track if current result is a mask (True) or transparent image (False)
+                        is_mask_state = gr.State(True) 
+                        save_result_btn = gr.Button("Save to Disk", variant="primary")
+                        tool_status = gr.Textbox(label="Status", value="Ready.")
+
+                    # Right: Preview
+                    with gr.Column(scale=2):
+                        result_output = gr.Image(label="Generated Result", type="pil", interactive=False)
 
                 with gr.Row():
                     back_btn_4 = gr.Button("< Back")
@@ -316,45 +294,38 @@ def render_wizard():
     tab_step_4.select(lambda: gr.update(choices=global_state.image_paths), outputs=img_selector)
     
     img_selector.change(
-        on_sam_image_change, 
-        inputs=img_selector, 
-        outputs=[sam_input_image, sam_mask_output, points_state, labels_state, tool_status]
+        on_image_change,
+        inputs=img_selector,
+        outputs=[result_output, is_mask_state, tool_status]
     )
-    
-    sam_input_image.select(
-        on_sam_click,
-        inputs=[img_selector, points_state, labels_state, bg_mode_state],
-        outputs=[sam_mask_output, points_state, labels_state, tool_status]
+
+    birefnet_btn.click(
+        run_birefnet_action,
+        inputs=img_selector,
+        outputs=[result_output, tool_status]
+    ).then(
+        lambda: True, outputs=is_mask_state
     )
-    
-    mode_toggle_btn.click(
-        on_toggle_mode,
-        inputs=bg_mode_state,
-        outputs=[bg_mode_state, mode_toggle_btn]
-    )
-    
-    undo_btn.click(
-        on_sam_undo,
-        inputs=[img_selector, points_state, labels_state],
-        outputs=[sam_mask_output, points_state, labels_state, tool_status]
-    )
-    
-    reset_btn.click(
-        on_sam_reset,
-        outputs=[sam_mask_output, points_state, labels_state, tool_status]
+
+    transparent_btn.click(
+        run_transparent_action,
+        inputs=img_selector,
+        outputs=[result_output, tool_status]
+    ).then(
+        lambda: False, outputs=is_mask_state
     )
 
     unload_btn.click(
-        on_sam_unload,
-        outputs=[sam_mask_output, points_state, labels_state, tool_status]
+        on_unload_model,
+        outputs=[result_output, is_mask_state, tool_status]
     )
     
-    save_mask_btn.click(
-        on_sam_save,
-        inputs=[img_selector, sam_mask_output],
+    save_result_btn.click(
+        on_save_result,
+        inputs=[img_selector, result_output, is_mask_state],
         outputs=tool_status
     )
-    
+
     back_btn_4.click(lambda: gr.Tabs(selected=2), outputs=tabs)
     next_btn_4.click(lambda: gr.Tabs(selected=4), outputs=tabs)
 
