@@ -20,4 +20,5 @@ dependencies = [
     "kornia>=0.8.2",
     "onnxruntime-gpu",
     "huggingface-hub",
+    "spandrel>=0.3.0",
 ]

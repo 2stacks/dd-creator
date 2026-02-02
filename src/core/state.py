@@ -7,8 +7,19 @@ class ProjectState:
     source_directory: str = ""
     output_directory: str = ""
     image_paths: List[str] = field(default_factory=list)
-    captions: dict = field(default_factory=dict) # path -> caption
-    masks: dict = field(default_factory=dict) # path -> mask_path
+    captions: dict = field(default_factory=dict)  # path -> caption
+    masks: dict = field(default_factory=dict)  # path -> mask_path
+    upscaled: dict = field(default_factory=dict)  # source_path -> output_path
+    transparent: dict = field(default_factory=dict)  # source_path -> transparent_path
+
+    def get_processing_status(self, image_path: str) -> dict:
+        """Get processing status for an image."""
+        return {
+            "has_caption": image_path in self.captions and bool(self.captions[image_path]),
+            "has_mask": image_path in self.masks,
+            "has_transparent": image_path in self.transparent,
+            "has_upscaled": image_path in self.upscaled,
+        }
     
     def get_output_path(self, source_path: str, ext: str) -> str:
         """
