@@ -240,9 +240,49 @@ def render_wizard():
                 scan_output = gr.Textbox(label="Status", interactive=False)
                 next_btn_1 = gr.Button("Next >", interactive=False)
 
-            # STEP 2 (MERGED)
-            with gr.TabItem("Step 2: Captioning", id=1) as tab_step_2:
-                gr.Markdown("## Step 2: Captioning & Review")
+            # STEP 2: Image Tools (moved before captioning)
+            with gr.TabItem("Step 2: Image Tools", id=1) as tab_step_2:
+                gr.Markdown("## Step 2: Masking & Image Tools")
+
+                with gr.Accordion("ℹ️ When to use Masks?", open=False):
+                    gr.Markdown("""
+                    ### Training with Masks
+                    Masks are used to tell the training script which parts of the image are important.
+
+                    *   **LoRAs**: Masks are often optional but highly recommended if you want the model to focus strictly on a subject.
+                    *   **Full Fine Tune**: Masks are critical to prevent 'background bleeding'.
+
+                    **BiRefNet** is used to automatically detect the subject and generate high-quality masks or transparent images.
+                    """)
+
+                with gr.Row():
+                    img_selector = gr.Dropdown(label="Select Image to Edit", scale=2)
+
+                with gr.Row():
+                    # Left: Controls
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Actions")
+                        birefnet_btn = gr.Button("Generate Mask", variant="primary")
+                        transparent_btn = gr.Button("Generate Transparent Image")
+                        unload_btn = gr.Button("🗑️ Unload Model")
+
+                        gr.Markdown("### Save Result")
+                        # Hidden state to track if current result is a mask (True) or transparent image (False)
+                        is_mask_state = gr.State(True)
+                        save_result_btn = gr.Button("Save to Disk", variant="primary")
+                        tool_status = gr.Textbox(label="Status", value="Ready.")
+
+                    # Right: Preview
+                    with gr.Column(scale=2):
+                        result_output = gr.Image(label="Generated Result", type="pil", interactive=False)
+
+                with gr.Row():
+                    back_btn_2 = gr.Button("< Back")
+                    next_btn_2 = gr.Button("Next >")
+
+            # STEP 3: Captioning (moved after image tools)
+            with gr.TabItem("Step 3: Captioning", id=2) as tab_step_3:
+                gr.Markdown("## Step 3: Captioning & Review")
                 
                 with gr.Accordion("🤖 Auto-Captioning Tools", open=False):
                     with gr.Row():
@@ -290,50 +330,10 @@ def render_wizard():
                             bulk_status = gr.Textbox(label="Bulk Status")
 
                 with gr.Row():
-                    back_btn_2 = gr.Button("< Back")
-                    next_btn_2 = gr.Button("Next >")
-
-            # STEP 3 (Old Step 4)
-            with gr.TabItem("Step 3: Image Tools", id=2) as tab_step_3:
-                gr.Markdown("## Step 3: Masking & Image Tools")
-                
-                with gr.Accordion("ℹ️ When to use Masks?", open=False):
-                    gr.Markdown("""
-                    ### Training with Masks
-                    Masks are used to tell the training script which parts of the image are important.
-                    
-                    *   **LoRAs**: Masks are often optional but highly recommended if you want the model to focus strictly on a subject.
-                    *   **Full Fine Tune**: Masks are critical to prevent 'background bleeding'.
-                    
-                    **BiRefNet** is used to automatically detect the subject and generate high-quality masks or transparent images.
-                    """)
-
-                with gr.Row():
-                    img_selector = gr.Dropdown(label="Select Image to Edit", scale=2)
-                
-                with gr.Row():
-                    # Left: Controls
-                    with gr.Column(scale=1):
-                        gr.Markdown("### Actions")
-                        birefnet_btn = gr.Button("Generate Mask", variant="primary")
-                        transparent_btn = gr.Button("Generate Transparent Image")
-                        unload_btn = gr.Button("🗑️ Unload Model")
-                        
-                        gr.Markdown("### Save Result")
-                        # Hidden state to track if current result is a mask (True) or transparent image (False)
-                        is_mask_state = gr.State(True) 
-                        save_result_btn = gr.Button("Save to Disk", variant="primary")
-                        tool_status = gr.Textbox(label="Status", value="Ready.")
-
-                    # Right: Preview
-                    with gr.Column(scale=2):
-                        result_output = gr.Image(label="Generated Result", type="pil", interactive=False)
-
-                with gr.Row():
                     back_btn_3 = gr.Button("< Back")
                     next_btn_3 = gr.Button("Next >")
 
-            # STEP 4 (Old Step 5)
+            # STEP 4: Export
             with gr.TabItem("Step 4: Export", id=3) as tab_step_4:
                 gr.Markdown("## Step 4: Project Finalized")
                 gr.Markdown("Your files have been saved alongside your images.")
@@ -342,39 +342,16 @@ def render_wizard():
                 back_btn_4 = gr.Button("< Back")
 
     # --- EVENT BINDINGS (Wired at the end to ensure all components exist) ---
-    
-    # Step 1
+
+    # Step 1: Import
     browse_input_btn.click(browse_directory, inputs=input_dir, outputs=input_dir)
     browse_output_btn.click(browse_directory, inputs=output_dir, outputs=output_dir)
     scan_btn.click(scan_action, inputs=[input_dir, output_dir, project_name], outputs=[scan_output, next_btn_1])
     next_btn_1.click(lambda: gr.Tabs(selected=1), outputs=tabs)
-    
-    # Step 2 (Merged)
-    # Auto-captioning triggers
-    caption_btn.click(run_captioning_action, inputs=model_dropdown, outputs=progress_bar)
-    
-    # Selection triggers
-    # When tab is selected, refresh gallery
-    tab_step_2.select(lambda: global_state.image_paths, outputs=gallery)
-    
-    # When gallery image is selected, update editor
-    gallery.select(on_select_image, outputs=[current_path_state, editor_caption])
-    
-    # Save button
-    save_entry_btn.click(save_caption_action, inputs=[current_path_state, editor_caption], outputs=save_status)
-    
-    # Bulk tools
-    replace_btn.click(bulk_replace_action, inputs=[find_box, replace_box], outputs=bulk_status)
-    prepend_btn.click(lambda t: bulk_add_action(t, "prepend"), inputs=tag_box, outputs=bulk_status)
-    append_btn.click(lambda t: bulk_add_action(t, "append"), inputs=tag_box, outputs=bulk_status)
-    
-    # Nav buttons
-    back_btn_2.click(lambda: gr.Tabs(selected=0), outputs=tabs)
-    next_btn_2.click(lambda: gr.Tabs(selected=2), outputs=tabs)
 
-    # Step 3
-    tab_step_3.select(lambda: gr.update(choices=global_state.image_paths), outputs=img_selector)
-    
+    # Step 2: Image Tools
+    tab_step_2.select(lambda: gr.update(choices=global_state.image_paths), outputs=img_selector)
+
     img_selector.change(
         on_image_change,
         inputs=img_selector,
@@ -401,17 +378,38 @@ def render_wizard():
         on_unload_model,
         outputs=[result_output, is_mask_state, tool_status]
     )
-    
+
     save_result_btn.click(
         on_save_result,
         inputs=[img_selector, result_output, is_mask_state],
         outputs=tool_status
     )
 
+    back_btn_2.click(lambda: gr.Tabs(selected=0), outputs=tabs)
+    next_btn_2.click(lambda: gr.Tabs(selected=2), outputs=tabs)
+
+    # Step 3: Captioning
+    caption_btn.click(run_captioning_action, inputs=model_dropdown, outputs=progress_bar)
+
+    # When tab is selected, refresh gallery
+    tab_step_3.select(lambda: global_state.image_paths, outputs=gallery)
+
+    # When gallery image is selected, update editor
+    gallery.select(on_select_image, outputs=[current_path_state, editor_caption])
+
+    # Save button
+    save_entry_btn.click(save_caption_action, inputs=[current_path_state, editor_caption], outputs=save_status)
+
+    # Bulk tools
+    replace_btn.click(bulk_replace_action, inputs=[find_box, replace_box], outputs=bulk_status)
+    prepend_btn.click(lambda t: bulk_add_action(t, "prepend"), inputs=tag_box, outputs=bulk_status)
+    append_btn.click(lambda t: bulk_add_action(t, "append"), inputs=tag_box, outputs=bulk_status)
+
+    # Nav buttons
     back_btn_3.click(lambda: gr.Tabs(selected=1), outputs=tabs)
     next_btn_3.click(lambda: gr.Tabs(selected=3), outputs=tabs)
 
-    # Step 4
+    # Step 4: Export
     def get_stats():
         return {
             "Images Found": len(global_state.image_paths),
