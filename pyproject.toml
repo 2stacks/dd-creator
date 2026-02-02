@@ -18,4 +18,6 @@ dependencies = [
     "bitsandbytes",
     "gradio-client>=1.6.0",
     "kornia>=0.8.2",
+    "onnxruntime-gpu",
+    "huggingface-hub",
 ]

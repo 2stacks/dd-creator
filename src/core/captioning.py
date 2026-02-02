@@ -12,6 +12,14 @@ from transformers import (
 from PIL import Image
 import numpy as np
 import gc
+import os
+import csv
+try:
+    import onnxruntime as ort
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    ort = None
+    hf_hub_download = None
 
 class BaseCaptioner:
     def __init__(self, model_id, device=None, **kwargs):
@@ -31,6 +39,8 @@ class BaseCaptioner:
         if self.model is not None:
             del self.model
             del self.processor
+            if hasattr(self, 'tags'):
+                del self.tags
             
             # clear kwargs/cache if any
             
@@ -46,6 +56,101 @@ class BaseCaptioner:
                 torch.cuda.empty_cache()
                 
             print(f"Unloaded {self.model_id}")
+
+class ONNXCaptioner(BaseCaptioner):
+    def load_model(self):
+        if self.model is not None:
+            return
+        
+        if ort is None or hf_hub_download is None:
+            raise ImportError("onnxruntime-gpu (or onnxruntime) and huggingface-hub are required for ONNX models.")
+
+        print(f"Loading ONNX model {self.model_id}...")
+        
+        # Download model and tags
+        try:
+            model_path = hf_hub_download(repo_id=self.model_id, filename="model.onnx")
+            tags_path = hf_hub_download(repo_id=self.model_id, filename="selected_tags.csv")
+        except Exception as e:
+            raise RuntimeError(f"Failed to download model or tags: {e}")
+
+        # Load Tags
+        self.tags = []
+        with open(tags_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader) # Skip header
+            for row in reader:
+                self.tags.append(row[1]) # tag name is usually index 1 (tag_id, name, type, count)
+
+        # Load Session
+        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        if self.device == "cpu":
+            providers = ['CPUExecutionProvider']
+            
+        self.model = ort.InferenceSession(model_path, providers=providers)
+        
+        # Get input name and shape
+        self.input_name = self.model.get_inputs()[0].name
+        self.input_shape = self.model.get_inputs()[0].shape[1:3] # (Batch, H, W, 3) -> (H, W) usually
+
+    def preprocess(self, image: Image.Image, height: int, width: int):
+        # 1. Resize with padding (keeping aspect ratio) or simple resize?
+        # WD14 usually expects simple resize or smart resize. 
+        # For simplicity and standard compliance with most taggers: BICUBIC resize to target.
+        
+        # Ensure RGBA -> RGB -> BGR
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Resize
+        image = image.resize((width, height), Image.BICUBIC)
+        
+        # Array conversion
+        img_array = np.array(image, dtype=np.float32)
+        
+        # RGB to BGR
+        img_array = img_array[:, :, ::-1]
+        
+        # Add batch dimension
+        img_array = np.expand_dims(img_array, axis=0) 
+        
+        return img_array
+
+    def generate_caption(self, image_path, threshold=0.35, **kwargs):
+        if self.model is None:
+            self.load_model()
+            
+        try:
+            image = Image.open(image_path)
+        except Exception as e:
+            return f"Error: {e}"
+
+        # Target size from model input or default 448
+        h, w = 448, 448
+        if hasattr(self, 'input_shape') and self.input_shape:
+             h, w = self.input_shape
+             
+        input_tensor = self.preprocess(image, h, w)
+        
+        # Run inference
+        outputs = self.model.run(None, {self.input_name: input_tensor})
+        probs = outputs[0][0] # (1, num_tags) -> (num_tags,)
+        
+        # Post-process tags
+        results = []
+        # General tags usually start after rating tags (first 4 usually: general, sensitive, questionable, explicit)
+        # But for WD14 v3, the CSV has 'category' column. 0=general, 9=rating, 4=character
+        # Simple thresholding is usually sufficient.
+        
+        for i, prob in enumerate(probs):
+            if prob > threshold:
+                if i < len(self.tags):
+                    tag = self.tags[i]
+                    # Format
+                    tag = tag.replace("_", " ")
+                    results.append(tag)
+                    
+        return ", ".join(results)
 
 class Florence2Captioner(BaseCaptioner):
     def load_model(self):
@@ -262,6 +367,10 @@ def get_captioner(name: str):
             # Use original model with 4-bit NF4 quantization
             return JoyCaptioner("fancyfeast/llama-joycaption-beta-one-hf-llava", load_in_4bit=True)
         return JoyCaptioner("fancyfeast/llama-joycaption-beta-one-hf-llava")
+    elif "WD ViT" in name:
+        return ONNXCaptioner("SmilingWolf/wd-vit-tagger-v3")
+    elif "WD ConvNext" in name:
+        return ONNXCaptioner("SmilingWolf/wd-v1-4-convnextv2-tagger-v2")
     elif "SmilingWolf" in name or "WD 1.4" in name:
         # Use p1atdev's mirror for WD14 v3 SwinV2 which is compatible with transformers
         return WD14Tagger("p1atdev/wd-swinv2-tagger-v3-hf")

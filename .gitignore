@@ -155,10 +155,10 @@ cython_debug/
 
 # Project Specific
 *.log
-outputs/
-temp/
-datasets/*
-!datasets/.gitkeep
 assets/*
 !assets/.gitkeep
-CLAUDE.md
+datasets/input/*
+!datasets/input/.gitkeep
+datasets/output/*
+!datasets/output/.gitkeep
+temp/

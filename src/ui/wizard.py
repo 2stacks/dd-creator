@@ -10,25 +10,58 @@ from src.core.segmentation import get_segmenter
 def render_wizard():
     # --- HELPER FUNCTIONS (Logic isolated from UI Layout) ---
     
-    def browse_directory():
+    def browse_directory(initial_path=None):
         try:
             import tkinter as tk
             from tkinter import filedialog
             root = tk.Tk()
             root.withdraw()
             root.attributes("-topmost", True)
-            directory = filedialog.askdirectory()
+            
+            # Resolve starting directory
+            start_dir = os.getcwd()
+            if initial_path:
+                temp_path = os.path.abspath(initial_path)
+                # Traverse up until we find a directory that exists
+                while temp_path and not os.path.exists(temp_path):
+                    parent = os.path.dirname(temp_path)
+                    if parent == temp_path: # Prevent infinite loop at root
+                        break
+                    temp_path = parent
+                
+                if os.path.exists(temp_path) and os.path.isdir(temp_path):
+                    start_dir = temp_path
+            
+            directory = filedialog.askdirectory(initialdir=start_dir)
             root.destroy()
-            return directory
+            return directory if directory else initial_path
         except Exception as e:
             print(f"Browse error: {e}")
-            return ""
+            return initial_path
 
-    def scan_action(path):
+    def scan_action(path, output_path, project_name):
         if not path or not os.path.isdir(path):
             return "Please select a valid directory.", gr.update(interactive=False)
-        msg = global_state.scan_directory(path)
+        
+        # Combine output path with project name if provided
+        final_output_path = output_path
+        if project_name and project_name.strip():
+            final_output_path = os.path.join(output_path, project_name.strip())
+
+        # Create output dir if it doesn't exist
+        if final_output_path and not os.path.exists(final_output_path):
+            try:
+                os.makedirs(final_output_path, exist_ok=True)
+            except Exception as e:
+                return f"Error creating output directory: {e}", gr.update(interactive=False)
+
+        msg = global_state.scan_directory(path, final_output_path)
         count = len(global_state.image_paths)
+        
+        # Add a note about where files are saving if it's different from source
+        if final_output_path and os.path.abspath(final_output_path) != os.path.abspath(path):
+            msg += f"\nOutput Directory: {os.path.abspath(final_output_path)}"
+            
         return msg, gr.update(interactive=(count > 0))
 
     def run_captioning_action(model_name, progress=gr.Progress()):
@@ -43,8 +76,8 @@ def render_wizard():
                 try:
                     cap = captioner.generate_caption(img_path)
                     global_state.captions[img_path] = cap
-                    # Auto-save to .txt
-                    txt_path = os.path.splitext(img_path)[0] + ".txt"
+                    # Auto-save to .txt (using output path logic)
+                    txt_path = global_state.get_output_path(img_path, ".txt")
                     with open(txt_path, "w", encoding="utf-8") as f:
                         f.write(cap)
                     success_count += 1
@@ -63,13 +96,13 @@ def render_wizard():
         if index < len(global_state.image_paths):
             path = global_state.image_paths[index]
             caption = global_state.captions.get(path, "")
-            return path, caption, path 
-        return None, "", None
+            return path, caption
+        return None, ""
 
     def save_caption_action(path, new_caption):
         if path and path in global_state.captions:
             global_state.captions[path] = new_caption
-            txt_path = os.path.splitext(path)[0] + ".txt"
+            txt_path = global_state.get_output_path(path, ".txt")
             try:
                 with open(txt_path, "w", encoding="utf-8") as f:
                     f.write(new_caption)
@@ -86,7 +119,8 @@ def render_wizard():
                 new_cap = cap.replace(find_text, replace_text)
                 global_state.captions[path] = new_cap
                 try:
-                    with open(os.path.splitext(path)[0] + ".txt", "w", encoding="utf-8") as f: f.write(new_cap)
+                    txt_path = global_state.get_output_path(path, ".txt")
+                    with open(txt_path, "w", encoding="utf-8") as f: f.write(new_cap)
                     count += 1
                 except: pass
         return f"Updated {count} captions."
@@ -98,7 +132,8 @@ def render_wizard():
             new_cap = f"{text}{cap}" if mode == "prepend" else f"{cap}{text}"
             global_state.captions[path] = new_cap
             try:
-                with open(os.path.splitext(path)[0] + ".txt", "w", encoding="utf-8") as f: f.write(new_cap)
+                txt_path = global_state.get_output_path(path, ".txt")
+                with open(txt_path, "w", encoding="utf-8") as f: f.write(new_cap)
                 count += 1
             except: pass
         return f"{mode.capitalize()}ed text to {count} captions."
@@ -147,7 +182,12 @@ def render_wizard():
             suffix = "_mask.png" if is_mask else "_transparent.png"
             subfolder = "masks" if is_mask else "transparent"
             
-            output_dir = os.path.join(os.path.dirname(image_path), subfolder)
+            # Use get_output_path to determine where the "base" file would be
+            # We use .txt as a dummy extension to find the folder location in the output dir
+            dummy_path = global_state.get_output_path(image_path, ".txt")
+            base_dir = os.path.dirname(dummy_path)
+            
+            output_dir = os.path.join(base_dir, subfolder)
             os.makedirs(output_dir, exist_ok=True)
             
             base_name = os.path.basename(image_path).rsplit('.', 1)[0]
@@ -171,58 +211,91 @@ def render_wizard():
             
             # STEP 1
             with gr.TabItem("Step 1: Import", id=0):
-                gr.Markdown("## Step 1: Select Dataset Directory")
-                with gr.Row():
-                    input_dir = gr.Textbox(label="Directory Path", placeholder="/path/to/images", scale=4)
-                    browse_btn = gr.Button("📂 Browse", scale=1)
-                scan_btn = gr.Button("Scan Directory", variant="primary")
+                gr.Markdown("## Step 1: Select Dataset Directories")
+                gr.Markdown("Define where your source images are located and where you want generated files (captions, masks) to be saved.")
+                
+                with gr.Group():
+                    with gr.Row():
+                        input_dir = gr.Textbox(label="Source Image Directory", placeholder="Path to source images", value="datasets/input", scale=4)
+                        browse_input_btn = gr.Button("📂 Browse", scale=1)
+                    
+                    with gr.Row():
+                        output_dir = gr.Textbox(
+                            label="Base Output Directory", 
+                            placeholder="Path to save results", 
+                            value="datasets/output", 
+                            scale=4,
+                            info="If this folder does not exist, it will be created automatically when you click Scan."
+                        )
+                        browse_output_btn = gr.Button("📂 Browse", scale=1)
+                    
+                    with gr.Row():
+                        project_name = gr.Textbox(
+                            label="Project Name / Subfolder (Optional)", 
+                            placeholder="e.g. my_new_dataset", 
+                            info="Appends to the Base Output Directory. Useful for organizing different experiments."
+                        )
+
+                scan_btn = gr.Button("Scan & Initialize", variant="primary")
                 scan_output = gr.Textbox(label="Status", interactive=False)
                 next_btn_1 = gr.Button("Next >", interactive=False)
 
-            # STEP 2
-            with gr.TabItem("Step 2: Auto-Caption", id=1):
-                gr.Markdown("## Step 2: Generate Captions")
-                model_dropdown = gr.Dropdown(
-                    ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption (4-bit Quantized)", "SmilingWolf WD14 (v3 SwinV2)"], 
-                    label="Select Model", value="Florence-2-Base"
-                )
-                gr.Markdown("**VRAM Requirements:** JoyCaption BF16 (~17GB), JoyCaption 4-bit (~8GB), Florence-2 (<4GB).")
-                caption_btn = gr.Button("Generate Captions")
-                progress_bar = gr.Textbox(label="Progress", value="Idle")
+            # STEP 2 (MERGED)
+            with gr.TabItem("Step 2: Captioning", id=1) as tab_step_2:
+                gr.Markdown("## Step 2: Captioning & Review")
+                
+                with gr.Accordion("🤖 Auto-Captioning Tools", open=False):
+                    with gr.Row():
+                        model_dropdown = gr.Dropdown(
+                            ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption (4-bit Quantized)", "SmilingWolf WD ViT (v3)", "SmilingWolf WD ConvNext (v3)"], 
+                            label="Select Model", 
+                            value="SmilingWolf WD ConvNext (v3)", 
+                            scale=2
+                        )
+                        caption_btn = gr.Button("Generate Captions for All Images", scale=1, variant="primary")
+                    
+                    with gr.Accordion("📊 VRAM Requirements", open=False):
+                        gr.Markdown("""
+                        - **Florence-2 (Base/Large):** ~1.2GB - 2.0GB
+                        - **BLIP (Base/Large):** ~1.0GB - 2.0GB
+                        - **WD14 (ViT / ConvNext):** < 1GB
+                        - **JoyCaption (4-bit):** ~6GB
+                        - **JoyCaption (BF16):** ~16GB
+                        *Note: Requirements are estimates and include model loading overhead.*
+                        """)
+                    
+                    progress_bar = gr.Textbox(label="Progress", value="Idle")
+
+                with gr.Row():
+                    # Gallery takes up more space now
+                    gallery = gr.Gallery(label="Images", columns=6, height=600, allow_preview=False, scale=3)
+                    
+                    # Editor Side Panel
+                    with gr.Column(scale=2):
+                        gr.Markdown("### Edit Tags")
+                        editor_caption = gr.Textbox(label="Caption", lines=10)
+                        save_entry_btn = gr.Button("Save Caption", variant="primary")
+                        save_status = gr.Textbox(label="Status", interactive=False)
+                        current_path_state = gr.State()
+
+                        with gr.Accordion("🛠️ Bulk Tools", open=False):
+                            find_box = gr.Textbox(label="Find", placeholder="Text to find")
+                            replace_box = gr.Textbox(label="Replace", placeholder="Replacement text")
+                            replace_btn = gr.Button("Replace All")
+                            
+                            tag_box = gr.Textbox(label="Tag / Text", placeholder="Text to add")
+                            with gr.Row():
+                                prepend_btn = gr.Button("Prepend to All")
+                                append_btn = gr.Button("Append to All")
+                            bulk_status = gr.Textbox(label="Bulk Status")
+
                 with gr.Row():
                     back_btn_2 = gr.Button("< Back")
                     next_btn_2 = gr.Button("Next >")
 
-            # STEP 3
-            with gr.TabItem("Step 3: Review", id=2) as tab_step_3:
-                gr.Markdown("## Step 3: Review and Edit Captions")
-                with gr.Row():
-                    gallery = gr.Gallery(label="Images", columns=4, height=600, allow_preview=False)
-                    with gr.Column():
-                        preview_image = gr.Image(label="Selected Image", type="filepath", interactive=False)
-                        editor_caption = gr.Textbox(label="Caption", lines=5)
-                        save_entry_btn = gr.Button("Save Caption Only", variant="primary")
-                        save_status = gr.Textbox(label="Save Status", interactive=False)
-                        current_path_state = gr.State()
-                
-                with gr.Accordion("🛠️ Bulk Caption Tools", open=False):
-                    with gr.Row():
-                        find_box = gr.Textbox(label="Find", placeholder="Text to find")
-                        replace_box = gr.Textbox(label="Replace", placeholder="Replacement text")
-                        replace_btn = gr.Button("Replace All")
-                    with gr.Row():
-                        tag_box = gr.Textbox(label="Tag / Text", placeholder="Text to add")
-                        prepend_btn = gr.Button("Prepend to All")
-                        append_btn = gr.Button("Append to All")
-                    bulk_status = gr.Textbox(label="Bulk Status")
-                
-                with gr.Row():
-                    back_btn_3 = gr.Button("< Back")
-                    next_btn_3 = gr.Button("Next >")
-
-            # STEP 4
-            with gr.TabItem("Step 4: Image Tools", id=3) as tab_step_4:
-                gr.Markdown("## Step 4: Masking & Image Tools")
+            # STEP 3 (Old Step 4)
+            with gr.TabItem("Step 3: Image Tools", id=2) as tab_step_3:
+                gr.Markdown("## Step 3: Masking & Image Tools")
                 
                 with gr.Accordion("ℹ️ When to use Masks?", open=False):
                     gr.Markdown("""
@@ -257,41 +330,50 @@ def render_wizard():
                         result_output = gr.Image(label="Generated Result", type="pil", interactive=False)
 
                 with gr.Row():
-                    back_btn_4 = gr.Button("< Back")
-                    next_btn_4 = gr.Button("Next >")
+                    back_btn_3 = gr.Button("< Back")
+                    next_btn_3 = gr.Button("Next >")
 
-            # STEP 5
-            with gr.TabItem("Step 5: Export", id=4) as tab_step_5:
-                gr.Markdown("## Step 5: Project Finalized")
+            # STEP 4 (Old Step 5)
+            with gr.TabItem("Step 4: Export", id=3) as tab_step_4:
+                gr.Markdown("## Step 4: Project Finalized")
                 gr.Markdown("Your files have been saved alongside your images.")
                 final_status = gr.JSON(label="Current Session Stats")
                 refresh_btn = gr.Button("Refresh Stats")
-                back_btn_5 = gr.Button("< Back")
+                back_btn_4 = gr.Button("< Back")
 
     # --- EVENT BINDINGS (Wired at the end to ensure all components exist) ---
     
     # Step 1
-    browse_btn.click(browse_directory, outputs=input_dir)
-    scan_btn.click(scan_action, inputs=input_dir, outputs=[scan_output, next_btn_1])
+    browse_input_btn.click(browse_directory, inputs=input_dir, outputs=input_dir)
+    browse_output_btn.click(browse_directory, inputs=output_dir, outputs=output_dir)
+    scan_btn.click(scan_action, inputs=[input_dir, output_dir, project_name], outputs=[scan_output, next_btn_1])
     next_btn_1.click(lambda: gr.Tabs(selected=1), outputs=tabs)
     
-    # Step 2
+    # Step 2 (Merged)
+    # Auto-captioning triggers
     caption_btn.click(run_captioning_action, inputs=model_dropdown, outputs=progress_bar)
-    back_btn_2.click(lambda: gr.Tabs(selected=0), outputs=tabs)
-    next_btn_2.click(lambda: (gr.Tabs(selected=2), global_state.image_paths), outputs=[tabs, gallery])
     
-    # Step 3
-    tab_step_3.select(lambda: global_state.image_paths, outputs=gallery)
-    gallery.select(on_select_image, outputs=[preview_image, editor_caption, current_path_state])
+    # Selection triggers
+    # When tab is selected, refresh gallery
+    tab_step_2.select(lambda: global_state.image_paths, outputs=gallery)
+    
+    # When gallery image is selected, update editor
+    gallery.select(on_select_image, outputs=[current_path_state, editor_caption])
+    
+    # Save button
     save_entry_btn.click(save_caption_action, inputs=[current_path_state, editor_caption], outputs=save_status)
+    
+    # Bulk tools
     replace_btn.click(bulk_replace_action, inputs=[find_box, replace_box], outputs=bulk_status)
     prepend_btn.click(lambda t: bulk_add_action(t, "prepend"), inputs=tag_box, outputs=bulk_status)
     append_btn.click(lambda t: bulk_add_action(t, "append"), inputs=tag_box, outputs=bulk_status)
-    back_btn_3.click(lambda: gr.Tabs(selected=1), outputs=tabs)
-    next_btn_3.click(lambda: gr.Tabs(selected=3), outputs=tabs)
+    
+    # Nav buttons
+    back_btn_2.click(lambda: gr.Tabs(selected=0), outputs=tabs)
+    next_btn_2.click(lambda: gr.Tabs(selected=2), outputs=tabs)
 
-    # Step 4
-    tab_step_4.select(lambda: gr.update(choices=global_state.image_paths), outputs=img_selector)
+    # Step 3
+    tab_step_3.select(lambda: gr.update(choices=global_state.image_paths), outputs=img_selector)
     
     img_selector.change(
         on_image_change,
@@ -326,18 +408,18 @@ def render_wizard():
         outputs=tool_status
     )
 
-    back_btn_4.click(lambda: gr.Tabs(selected=2), outputs=tabs)
-    next_btn_4.click(lambda: gr.Tabs(selected=4), outputs=tabs)
+    back_btn_3.click(lambda: gr.Tabs(selected=1), outputs=tabs)
+    next_btn_3.click(lambda: gr.Tabs(selected=3), outputs=tabs)
 
-    # Step 5
+    # Step 4
     def get_stats():
         return {
             "Images Found": len(global_state.image_paths),
             "Captions Loaded/Created": len(global_state.captions),
             "Masks Created": len(global_state.masks)
         }
-    tab_step_5.select(get_stats, outputs=final_status)
+    tab_step_4.select(get_stats, outputs=final_status)
     refresh_btn.click(get_stats, outputs=final_status)
-    back_btn_5.click(lambda: gr.Tabs(selected=3), outputs=tabs)
+    back_btn_4.click(lambda: gr.Tabs(selected=2), outputs=tabs)
 
     return wizard_container
