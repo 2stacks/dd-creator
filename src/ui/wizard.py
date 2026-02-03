@@ -957,7 +957,7 @@ def render_wizard():
                 with gr.Accordion("🤖 Auto-Captioning Tools", open=False):
                     with gr.Row():
                         model_dropdown = gr.Dropdown(
-                            ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "SmilingWolf WD ViT (v3)", "SmilingWolf WD ConvNext (v3)"],
+                            ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption Quantized (8-bit)", "SmilingWolf WD ViT (v3)", "SmilingWolf WD ConvNext (v3)"],
                             label="Select Model",
                             value="SmilingWolf WD ConvNext (v3)",
                             scale=2
@@ -969,7 +969,9 @@ def render_wizard():
                         - **Florence-2 (Base/Large):** ~1.2GB - 2.0GB
                         - **BLIP (Base/Large):** ~1.0GB - 2.0GB
                         - **WD14 (ViT / ConvNext):** < 1GB
-                        - **JoyCaption (BF16):** ~22GB (requires high-end GPU)
+                        - **JoyCaption (BF16):** ~17GB (requires 20GB+ GPU)
+                        - **JoyCaption Quantized (8-bit):** ~12-16GB (requires minimum 16GB GPU)
+
                         *Note: Requirements are estimates and include model loading overhead.*
                         """)
 

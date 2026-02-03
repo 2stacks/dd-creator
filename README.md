@@ -1,56 +1,102 @@
-# dd-creator
+# Diffusion Dataset Creator
 
-A Gradio-based tool to help users create high-quality datasets for training diffusion models (FLUX.1, SDXL, etc.).
+A local, GPU-accelerated tool for creating high-quality training datasets for diffusion models (FLUX.1, SDXL, SD 1.5, etc.).
+
+![Step 2: Image Tools](assets/screenshot-image-tools.png)
 
 ## Features
 
-- **Local Processing**: Runs entirely on your machine using your GPU.
-- **Auto-Captioning**: Uses State-of-the-Art VLM (Vision Language Models) like Florence-2 for detailed captions.
-- **Masking**: Built-in tool to draw training masks for in-painting or specific concept training.
-- **Dual Modes**:
-    - **Wizard Mode**: A guided step-by-step process for beginners.
-    - **Dashboard Mode**: A flexible interface for advanced users.
-- **Non-Destructive**: Preserves original image aspect ratios (relies on Bucketing during training).
+- **Image Upscaling** - Real-ESRGAN upscaling via Spandrel for enhancing low-resolution source images
+- **Background Removal** - BiRefNet-powered automatic mask generation and transparency
+- **Auto-Captioning** - Multiple model options:
+  - Florence-2 (Base/Large) - Fast, detailed captions
+  - BLIP (Base/Large) - Lightweight natural language captions
+  - JoyCaption - High-quality descriptive captions (BF16 or 8-bit quantized)
+  - WD14 Taggers (ONNX) - Booru-style tags via ViT, ConvNext, or SwinV2
+- **Non-Destructive Workflow** - Separate input/output directories preserve originals
+- **Local Processing** - Runs entirely on your machine, no cloud dependencies
 
-## Installation & Usage
+## Screenshots
 
-This project uses [uv](https://github.com/astral-sh/uv) for fast Python package management.
+| Import | Image Tools | Captioning |
+|--------|-------------|------------|
+| ![Import](assets/screenshot-import.png) | ![Tools](assets/screenshot-image-tools.png) | ![Captioning](assets/screenshot-captioning.png) |
 
-1.  **Prerequisites**:
-    - [uv](https://github.com/astral-sh/uv) installed.
-    - NVIDIA GPU with CUDA drivers installed (Recommended).
+## Requirements
 
-2.  **Run the Application**:
-    `uv` will automatically create the virtual environment and install dependencies the first time you run the app.
+- Python 3.10+
+- NVIDIA GPU with CUDA (recommended)
+- [uv](https://github.com/astral-sh/uv) package manager
 
-    ```bash
-    uv run app.py
-    ```
+### GPU Memory Requirements
 
-    Open your browser to the local URL provided (usually `http://127.0.0.1:7860`).
+| Model | VRAM |
+|-------|------|
+| Florence-2 | ~4GB |
+| BLIP | ~2-4GB |
+| JoyCaption (BF16) | ~17GB (requires 20GB+ GPU) |
+| JoyCaption (8-bit) | ~12-16GB (requires 16GB+ GPU) |
+| WD14 ONNX | ~2GB |
+| BiRefNet | ~4GB |
+| Real-ESRGAN | ~2-4GB |
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/dd-creator.git
+cd dd-creator
+
+# Run (uv auto-creates venv and installs dependencies)
+uv run app.py
+```
+
+Open your browser to `http://127.0.0.1:7860`
+
+### Upscaler Models
+
+Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directory. Popular options:
+- [RealESRGAN_x4plus](https://github.com/xinntao/Real-ESRGAN)
+- [4x-UltraSharp](https://openmodeldb.info/models/4x-UltraSharp)
+
+## Usage
+
+The wizard guides you through 4 steps:
+
+1. **Import** - Select source directory and output location
+2. **Image Tools** - Upscale, generate masks, create transparent versions
+3. **Captioning** - Auto-caption with AI models or edit manually
+4. **Export** - Review and finalize your dataset
 
 ## Project Structure
 
-```text
+```
 dd-creator/
-├── app.py              # Main entry point (Gradio App)
+├── app.py                 # Gradio application entry point
 ├── src/
-│   ├── core/           # Backend logic
-│   │   ├── state.py    # State management
-│   │   ├── captioning.py # Florence-2 VLM integration
-│   │   └── segmentation.py # Logic for masking/segmentation
-│   └── ui/             # Frontend components
-│       ├── wizard.py   # Guided workflow UI
-│       └── dashboard.py # Advanced dashboard UI
-├── datasets/           # Directory for storing dataset inputs/outputs
-├── assets/             # Static assets
-└── pyproject.toml      # Project configuration and dependencies
+│   ├── core/
+│   │   ├── state.py       # Project state management
+│   │   ├── captioning.py  # VLM/tagger model wrappers
+│   │   ├── segmentation.py # BiRefNet background removal
+│   │   └── upscaling.py   # Real-ESRGAN upscaling
+│   └── ui/
+│       ├── wizard.py      # 4-step guided workflow
+│       └── dashboard.py   # Advanced tools (WIP)
+├── .models/               # User-provided upscaler models
+├── .hf_cache/             # HuggingFace model cache
+└── assets/                # README screenshots
 ```
 
 ## Development
 
-To add new dependencies:
-
 ```bash
+# Add dependencies
 uv add <package_name>
+
+# Run with auto-reload (if using gradio dev mode)
+uv run app.py
 ```
+
+## License
+
+MIT

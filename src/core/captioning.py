@@ -7,6 +7,7 @@ from transformers import (
     AutoModelForImageClassification,
     AutoImageProcessor,
     LlavaForConditionalGeneration,
+    BitsAndBytesConfig,
 )
 from PIL import Image
 import numpy as np
@@ -294,11 +295,126 @@ class JoyCaptioner(BaseCaptioner):
 
         # Decode the caption
         caption = self.processor.tokenizer.decode(
-            generate_ids, 
-            skip_special_tokens=True, 
+            generate_ids,
+            skip_special_tokens=True,
             clean_up_tokenization_spaces=False
         )
         return caption.strip()
+
+
+class JoyCaptionerQuantized(BaseCaptioner):
+    """Quantized JoyCaption using 8-bit bitsandbytes quantization.
+
+    Uses LLM.int8() which has mature support for llm_int8_skip_modules.
+    Keeps vision_tower and multi_modal_projector in full precision.
+
+    Requires ~10-12GB VRAM instead of ~17GB for the full BF16 model.
+    """
+
+    def load_model(self):
+        if self.model is not None:
+            return
+
+        print(f"Loading {self.model_id} (8-bit quantized)...")
+
+        # Use 8-bit quantization (LLM.int8()) which has better support
+        # for llm_int8_skip_modules than 4-bit quantization
+        bnb_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_skip_modules=[
+                "vision_tower",
+                "multi_modal_projector",
+                "lm_head",
+                # Also try with model. prefix patterns
+                "model.vision_tower",
+                "model.multi_modal_projector",
+            ],
+        )
+
+        self.processor = AutoProcessor.from_pretrained(self.model_id)
+
+        # Load with 8-bit quantization
+        self.model = LlavaForConditionalGeneration.from_pretrained(
+            self.model_id,
+            quantization_config=bnb_config,
+            device_map="auto",
+            # Don't specify torch_dtype - let bitsandbytes handle it
+        )
+        self.model.eval()
+
+        # Report memory usage
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"Model loaded. GPU memory allocated: {allocated:.2f} GB")
+
+    def generate_caption(self, image_path, prompt="Write a long descriptive caption for this image in a formal tone.", **kwargs):
+        if self.model is None:
+            self.load_model()
+
+        try:
+            image = Image.open(image_path).convert("RGB")
+        except Exception as e:
+            return f"Error: {e}"
+
+        # Get target size from processor and pre-resize to avoid lanczos interpolation error
+        target_size = getattr(self.processor.image_processor, 'size', {})
+        if isinstance(target_size, dict):
+            h = target_size.get('height', 384)
+            w = target_size.get('width', 384)
+        else:
+            h = w = target_size if isinstance(target_size, int) else 384
+
+        # Resize to exact target size using PIL (supports all interpolation modes)
+        image = image.resize((w, h), Image.BICUBIC)
+
+        # Build the conversation
+        convo = [
+            {
+                "role": "system",
+                "content": "You are a helpful image captioner.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
+
+        # Format the conversation
+        convo_string = self.processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
+
+        # Process inputs (do_resize=False since we pre-resized)
+        inputs = self.processor(text=[convo_string], images=[image], return_tensors="pt", do_resize=False)
+
+        # Move to device - handle potential dtype issues
+        inputs = {k: v.to(self.device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+
+        # Cast pixel_values to float16 for 8-bit inference
+        if 'pixel_values' in inputs:
+            inputs['pixel_values'] = inputs['pixel_values'].to(torch.float16)
+
+        with torch.no_grad():
+            generate_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=512,
+                do_sample=True,
+                suppress_tokens=None,
+                use_cache=True,
+                temperature=0.6,
+                top_k=None,
+                top_p=0.9,
+            )[0]
+
+        # Trim off the prompt
+        generate_ids = generate_ids[inputs['input_ids'].shape[1]:]
+
+        # Decode the caption
+        caption = self.processor.tokenizer.decode(
+            generate_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False
+        )
+        return caption.strip()
+
 
 class WD14Tagger(BaseCaptioner):
     def load_model(self):
@@ -360,8 +476,10 @@ def get_captioner(name: str):
     elif "BLIP-Base" in name:
         return BlipCaptioner("Salesforce/blip-image-captioning-base")
     elif "JoyCaption" in name:
-        # BF16 only - quantization via bitsandbytes doesn't work with this model
-        return JoyCaptioner("fancyfeast/llama-joycaption-beta-one-hf-llava")
+        model_id = "fancyfeast/llama-joycaption-beta-one-hf-llava"
+        if "Quantized" in name or "8-bit" in name:
+            return JoyCaptionerQuantized(model_id)
+        return JoyCaptioner(model_id)
     elif "WD ViT" in name:
         return ONNXCaptioner("SmilingWolf/wd-vit-tagger-v3")
     elif "WD ConvNext" in name:
