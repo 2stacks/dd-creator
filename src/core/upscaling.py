@@ -1,10 +1,18 @@
 import torch
 import gc
 import os
+from enum import Enum
 from PIL import Image, ImageOps
 
 # Spandrel is a universal loader for ESRGAN/Real-ESRGAN/SwinIR models
 import spandrel
+
+
+class ProcessorAction(Enum):
+    """Action routing for conditional image processing."""
+    UPSCALE_THEN_RESIZE = "upscaled"
+    PASSTHROUGH = "passthrough"
+    DIRECT_RESIZE = "resized"
 
 # Directory where user places .pth model files
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".models")
@@ -31,6 +39,123 @@ def should_upscale(image_path: str, min_dimension: int = 1024) -> bool:
             return min(width, height) < min_dimension
     except Exception:
         return False
+
+
+def resize_to_target(image: Image.Image, target_long_side: int) -> Image.Image:
+    """Resize image so its longest side matches target_long_side, preserving aspect ratio.
+
+    Uses Lanczos resampling for high-quality downscaling.
+    """
+    width, height = image.size
+
+    # Don't upscale - only downscale
+    if max(width, height) <= target_long_side:
+        return image
+
+    if width >= height:
+        new_width = target_long_side
+        new_height = int(height * (target_long_side / width))
+    else:
+        new_height = target_long_side
+        new_width = int(width * (target_long_side / height))
+
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+
+def resize_to_shortest_side(image: Image.Image, target_short_side: int) -> Image.Image:
+    """Resize image so its shortest side matches target_short_side, preserving aspect ratio.
+
+    Uses Lanczos resampling for high-quality downscaling.
+    Only downscales - returns original if already smaller than target.
+    """
+    width, height = image.size
+    short_side = min(width, height)
+
+    # Don't upscale - only downscale
+    if short_side <= target_short_side:
+        return image
+
+    scale = target_short_side / short_side
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+
+def get_processor_action(
+    image_path: str,
+    upscale_threshold: int = 1500,
+    passthrough_max: int = 2500
+) -> tuple[ProcessorAction, tuple[int, int]]:
+    """Determine which action to take based on image's shortest side.
+
+    Args:
+        image_path: Path to the image file
+        upscale_threshold: Images with shortest side below this get upscaled (default 1500)
+        passthrough_max: Images with shortest side at or below this pass through (default 2500)
+
+    Returns:
+        Tuple of (action, (width, height))
+    """
+    with Image.open(image_path) as img:
+        width, height = img.size
+        short_side = min(width, height)
+
+    if short_side < upscale_threshold:
+        return ProcessorAction.UPSCALE_THEN_RESIZE, (width, height)
+    elif short_side <= passthrough_max:
+        return ProcessorAction.PASSTHROUGH, (width, height)
+    else:
+        return ProcessorAction.DIRECT_RESIZE, (width, height)
+
+
+def process_image(
+    image_path: str,
+    upscaler,
+    target_short_side: int = 2048,
+    upscale_threshold: int = 1500,
+    passthrough_max: int = 2500
+) -> tuple[Image.Image, ProcessorAction]:
+    """Process image with conditional routing based on shortest side.
+
+    Routes images based on shortest side dimension:
+    - < upscale_threshold: Upscale with Real-ESRGAN, then Lanczos resize to target
+    - upscale_threshold to passthrough_max: Copy as-is (passthrough)
+    - > passthrough_max: Direct Lanczos downscale to target
+
+    Args:
+        image_path: Path to the image file
+        upscaler: SpandrelUpscaler instance (can be None for non-upscale paths)
+        target_short_side: Target size for shortest side (default 2048)
+        upscale_threshold: Below this → upscale (default 1500)
+        passthrough_max: At or below this → passthrough (default 2500)
+
+    Returns:
+        Tuple of (processed PIL Image, action taken)
+    """
+    with Image.open(image_path) as img:
+        width, height = img.size
+        short_side = min(width, height)
+
+    if short_side < upscale_threshold:
+        # Small image: upscale then resize to target
+        if upscaler is None:
+            raise ValueError("Upscaler required for images below upscale threshold")
+        upscaled = upscaler.upscale(image_path)
+        result = resize_to_shortest_side(upscaled, target_short_side)
+        return result, ProcessorAction.UPSCALE_THEN_RESIZE
+
+    elif short_side <= passthrough_max:
+        # Medium image: copy as-is (just convert to RGB and fix orientation)
+        img = Image.open(image_path).convert("RGB")
+        img = ImageOps.exif_transpose(img)
+        return img, ProcessorAction.PASSTHROUGH
+
+    else:
+        # Large image: direct Lanczos resize to target
+        img = Image.open(image_path).convert("RGB")
+        img = ImageOps.exif_transpose(img)
+        result = resize_to_shortest_side(img, target_short_side)
+        return result, ProcessorAction.DIRECT_RESIZE
 
 
 class SpandrelUpscaler:
@@ -194,6 +319,39 @@ class SpandrelUpscaler:
         output = np.clip(output * 255, 0, 255).astype(np.uint8)
 
         return Image.fromarray(output)
+
+    def upscale_for_training(
+        self,
+        image_path: str,
+        target_long_side: int = 1024,
+        tile_size: int = 512,
+        tile_overlap: int = 32
+    ) -> Image.Image:
+        """Upscale an image then downscale to target resolution for training.
+
+        This produces sharp details by upscaling with a high-quality model
+        then resizing down to a practical training resolution.
+
+        Args:
+            image_path: Path to the image file
+            target_long_side: Target resolution for the longest side (default 1024)
+            tile_size: Size of tiles for processing (default 512)
+            tile_overlap: Overlap between tiles for seamless blending (default 32)
+
+        Returns:
+            PIL Image at the target resolution with enhanced details
+        """
+        # First upscale to get sharp details
+        upscaled = self.upscale(image_path, tile_size, tile_overlap)
+
+        # Then downscale to target resolution
+        result = resize_to_target(upscaled, target_long_side)
+
+        upscaled_w, upscaled_h = upscaled.size
+        final_w, final_h = result.size
+        print(f"Upscaled to {upscaled_w}x{upscaled_h}, resized to {final_w}x{final_h}")
+
+        return result
 
     def unload_model(self):
         """Unload the model and free VRAM."""

@@ -1,13 +1,12 @@
 import torch
 from transformers import (
-    AutoProcessor, 
-    AutoModelForCausalLM, 
-    BlipProcessor, 
+    AutoProcessor,
+    AutoModelForCausalLM,
+    BlipProcessor,
     BlipForConditionalGeneration,
     AutoModelForImageClassification,
     AutoImageProcessor,
     LlavaForConditionalGeneration,
-    BitsAndBytesConfig
 )
 from PIL import Image
 import numpy as np
@@ -222,41 +221,39 @@ class JoyCaptioner(BaseCaptioner):
     def load_model(self):
         if self.model is not None:
             return
-        
+
         dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-        is_4bit = self.kwargs.get("load_in_4bit", False)
-        
-        print(f"Loading {self.model_id} (Dtype: {dtype}, 4-bit: {is_4bit})...")
-        
+
+        print(f"Loading {self.model_id} (dtype: {dtype})...")
+
         self.processor = AutoProcessor.from_pretrained(self.model_id)
-        
-        quantization_config = None
-        if is_4bit:
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=dtype,
-                bnb_4bit_use_double_quant=True,
-                llm_int8_skip_modules=["vision_tower", "multi_modal_projector", "vision_model"]
-            )
-        
         self.model = LlavaForConditionalGeneration.from_pretrained(
             self.model_id,
             torch_dtype=dtype,
             device_map="auto",
-            quantization_config=quantization_config,
-            trust_remote_code=True
         )
         self.model.eval()
 
     def generate_caption(self, image_path, prompt="Write a long descriptive caption for this image in a formal tone.", **kwargs):
         if self.model is None:
             self.load_model()
-        
+
         try:
             image = Image.open(image_path).convert("RGB")
         except Exception as e:
             return f"Error: {e}"
+
+        # Get target size from processor and pre-resize to avoid lanczos interpolation error
+        # The processor uses lanczos which PyTorch F.interpolate doesn't support
+        target_size = getattr(self.processor.image_processor, 'size', {})
+        if isinstance(target_size, dict):
+            h = target_size.get('height', 384)
+            w = target_size.get('width', 384)
+        else:
+            h = w = target_size if isinstance(target_size, int) else 384
+
+        # Resize to exact target size using PIL (supports all interpolation modes)
+        image = image.resize((w, h), Image.BICUBIC)
 
         # Build the conversation exactly as provided
         convo = [
@@ -273,10 +270,10 @@ class JoyCaptioner(BaseCaptioner):
         # Format the conversation
         convo_string = self.processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
         
-        # Process inputs
-        inputs = self.processor(text=[convo_string], images=[image], return_tensors="pt").to(self.device)
-        
-        # Use bfloat16 for pixel values if supported
+        # Process inputs (do_resize=False since we pre-resized to avoid lanczos error)
+        inputs = self.processor(text=[convo_string], images=[image], return_tensors="pt", do_resize=False).to(self.device)
+
+        # Cast pixel_values to match vision tower dtype
         dtype = torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
         inputs['pixel_values'] = inputs['pixel_values'].to(dtype)
 
@@ -363,9 +360,7 @@ def get_captioner(name: str):
     elif "BLIP-Base" in name:
         return BlipCaptioner("Salesforce/blip-image-captioning-base")
     elif "JoyCaption" in name:
-        if "8-bit" in name or "Quantized" in name or "FP8" in name:
-            # Use original model with 4-bit NF4 quantization
-            return JoyCaptioner("fancyfeast/llama-joycaption-beta-one-hf-llava", load_in_4bit=True)
+        # BF16 only - quantization via bitsandbytes doesn't work with this model
         return JoyCaptioner("fancyfeast/llama-joycaption-beta-one-hf-llava")
     elif "WD ViT" in name:
         return ONNXCaptioner("SmilingWolf/wd-vit-tagger-v3")

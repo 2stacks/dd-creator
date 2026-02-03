@@ -7,7 +7,10 @@ from PIL import Image, ImageOps
 from src.core.state import global_state
 from src.core.captioning import get_captioner
 from src.core.segmentation import get_segmenter
-from src.core.upscaling import get_upscaler, get_available_models, should_upscale
+from src.core.upscaling import (
+    get_upscaler, get_available_models, should_upscale, resize_to_target,
+    process_image, ProcessorAction
+)
 
 def render_wizard():
     # --- HELPER FUNCTIONS (Logic isolated from UI Layout) ---
@@ -145,153 +148,303 @@ def render_wizard():
         index = evt.index
         if index < len(global_state.image_paths):
             path = global_state.image_paths[index]
-            # Get image info
+            # Load original image
             try:
-                with Image.open(path) as img:
-                    width, height = img.size
-                info = f"Original: {width}x{height}px"
-            except:
-                info = "Unknown size"
+                img = Image.open(path).convert("RGB")
+                img = ImageOps.exif_transpose(img)
+                width, height = img.size
+                status_text = f"Selected: {os.path.basename(path)} ({width}x{height}px)"
+            except Exception as e:
+                img = None
+                status_text = f"Error loading image: {e}"
 
-            # Get processing status
-            status = global_state.get_processing_status(path)
-            status_parts = []
-            if status["has_mask"]:
-                status_parts.append("Mask")
-            if status["has_transparent"]:
-                status_parts.append("Transparent")
-            if status["has_upscaled"]:
-                status_parts.append("Upscaled")
-            status_str = ", ".join(status_parts) if status_parts else "Not yet processed"
+            # Check for existing processed versions
+            proc_status = global_state.get_processing_status(path)
+            existing_upscaled = None
+            existing_mask = None
+            existing_transparent = None
 
-            filename = os.path.basename(path)
-            # Reset working image when selecting new image
-            return path, f"{filename}\n{info} | Saved: {status_str}", None, None, None, "Choose base image: Use Original or Upscale"
-        return None, "", None, None, None, ""
+            if proc_status["has_upscaled"] and path in global_state.upscaled:
+                try:
+                    existing_upscaled = Image.open(global_state.upscaled[path])
+                except:
+                    pass
 
-    def use_original_action(image_path):
-        """Use the original image as the working image."""
-        if not image_path:
-            return None, None, "No image selected."
-        try:
-            img = Image.open(image_path).convert("RGB")
-            img = ImageOps.exif_transpose(img)
-            width, height = img.size
-            return img, False, f"Using original ({width}x{height}). Ready for processing."
-        except Exception as e:
-            return None, None, f"Error: {e}"
+            if proc_status["has_mask"] and path in global_state.masks:
+                try:
+                    existing_mask = Image.open(global_state.masks[path])
+                except:
+                    pass
 
-    def upscale_action(image_path, model_name):
-        """Upscale the image and use as working image."""
+            if proc_status["has_transparent"] and path in global_state.transparent:
+                try:
+                    existing_transparent = Image.open(global_state.transparent[path])
+                except:
+                    pass
+
+            # Return: path, original_img, status for each tab, existing processed images, reset states
+            return (
+                path,                    # selected_path_state
+                img,                     # workbench_original
+                status_text,             # original_status
+                existing_upscaled,       # workbench_upscaled
+                "Run upscale to generate." if not existing_upscaled else "Upscaled version loaded.",  # upscale_status
+                existing_mask,           # workbench_mask
+                "Create mask to generate." if not existing_mask else "Mask loaded.",  # mask_status
+                existing_transparent,    # workbench_transparent
+                "Create transparent to generate." if not existing_transparent else "Transparent loaded.",  # transparent_status
+                None,                    # upscaled_image_state (reset)
+                None,                    # resized_image_state (reset)
+                None,                    # mask_image_state (reset)
+                None                     # transparent_image_state (reset)
+            )
+        return (None, None, "Select an image from the library.", None, "Select an image first.",
+                None, "Select an image first.", None, "Select an image first.", None, None, None, None)
+
+    def upscale_action(image_path, model_name, target_resolution):
+        """Upscale the image with smart resize for training.
+
+        Workflow: Upscale with high-quality model, then downscale to target
+        resolution on shortest side. This produces sharp details at practical sizes.
+        """
         if not image_path:
             return None, None, "No image selected."
         if not model_name or model_name == "No models found":
             return None, None, "No upscaler model selected. Place .pth files in .models/"
         try:
+            from src.core.upscaling import resize_to_shortest_side
+
             upscaler = get_upscaler(model_name)
-            result = upscaler.upscale(image_path)
+            # Upscale first
+            upscaled = upscaler.upscale(image_path)
+            # Then downscale to target shortest side
+            result = resize_to_shortest_side(upscaled, int(target_resolution))
             width, height = result.size
-            return result, True, f"Upscaled {upscaler.scale}x ({width}x{height}). Ready for processing."
+            return result, result, f"Upscaled {upscaler.scale}x → resized to {width}x{height}px. Click 'Save' to save as JPG."
         except Exception as e:
             return None, None, f"Upscale Error: {e}"
 
-    def generate_mask_action(working_image):
-        """Generate mask from the working image."""
-        if working_image is None:
-            return None, "No working image. Click 'Use Original' or 'Upscale' first."
+    def generate_mask_action(image_path, upscaled_img, resized_img, invert_mask):
+        """Generate mask from processed image (upscaled/resized) if available, otherwise from original."""
+        if not image_path:
+            return None, None, "No image selected."
+
         try:
-            # Save working image to temp file for segmenter
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                working_image.save(tmp.name)
-                temp_path = tmp.name
-
             seg = get_segmenter()
-            mask = seg.segment(temp_path)
 
-            # Clean up temp file
-            os.unlink(temp_path)
+            # Priority: upscaled > resized > original
+            processed_img = upscaled_img if upscaled_img is not None else resized_img
 
-            return mask, "Mask generated from working image."
+            if processed_img is not None:
+                # Save processed image to temp file for segmenter
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    if isinstance(processed_img, Image.Image):
+                        processed_img.save(tmp.name)
+                    elif isinstance(processed_img, np.ndarray):
+                        Image.fromarray(processed_img).save(tmp.name)
+                    temp_path = tmp.name
+
+                mask = seg.segment(temp_path)
+                os.unlink(temp_path)
+                source_info = "upscaled image" if upscaled_img is not None else "resized image"
+            else:
+                mask = seg.segment(image_path)
+                source_info = "original image"
+
+            if invert_mask and mask:
+                # Invert the mask (white becomes black, black becomes white)
+                mask = ImageOps.invert(mask.convert("L")).convert("RGB")
+
+            return mask, mask, f"Mask generated from {source_info}. Click 'Save Mask' to save."
         except Exception as e:
-            return None, f"Mask Error: {e}"
+            return None, None, f"Mask Error: {e}"
 
-    def generate_transparent_action(working_image):
-        """Generate transparent image from the working image."""
-        if working_image is None:
-            return None, "No working image. Click 'Use Original' or 'Upscale' first."
+    def generate_transparent_action(image_path, upscaled_img, resized_img, alpha_threshold):
+        """Generate transparent image from processed image (upscaled/resized) if available, otherwise from original."""
+        if not image_path:
+            return None, None, "No image selected."
+
         try:
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                working_image.save(tmp.name)
-                temp_path = tmp.name
-
             seg = get_segmenter()
-            transparent = seg.segment(temp_path, return_transparent=True)
 
-            os.unlink(temp_path)
+            # Priority: upscaled > resized > original
+            processed_img = upscaled_img if upscaled_img is not None else resized_img
 
-            return transparent, "Transparent image generated from working image."
+            if processed_img is not None:
+                # Save processed image to temp file for segmenter
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    if isinstance(processed_img, Image.Image):
+                        processed_img.save(tmp.name)
+                    elif isinstance(processed_img, np.ndarray):
+                        Image.fromarray(processed_img).save(tmp.name)
+                    temp_path = tmp.name
+
+                transparent = seg.segment(temp_path, return_transparent=True)
+                os.unlink(temp_path)
+                source_info = "upscaled image" if upscaled_img is not None else "resized image"
+            else:
+                transparent = seg.segment(image_path, return_transparent=True)
+                source_info = "original image"
+
+            return transparent, transparent, f"Transparent generated from {source_info}. Click 'Save Transparent' to save."
         except Exception as e:
-            return None, f"Transparent Error: {e}"
+            return None, None, f"Transparent Error: {e}"
 
-    def save_working_image(image_path, working_image, is_upscaled):
-        """Save the working image to output directory."""
-        if not image_path or working_image is None:
-            return "No working image to save."
+    def save_original_action(image_path, original_img):
+        """Save the original image to the output directory."""
+        if not image_path:
+            return "No image selected."
+        if original_img is None:
+            return "No image to save."
+
         try:
             ext = os.path.splitext(image_path)[1]
             output_path = global_state.get_output_path(image_path, ext)
 
-            # Handle different types that Gradio State might provide
-            if isinstance(working_image, Image.Image):
-                working_image.save(output_path)
-            elif isinstance(working_image, np.ndarray):
-                Image.fromarray(working_image).save(output_path)
-            elif isinstance(working_image, str):
-                # If it's a file path, copy it
-                import shutil
-                shutil.copy2(working_image, output_path)
+            if isinstance(original_img, Image.Image):
+                original_img.save(output_path)
+            elif isinstance(original_img, np.ndarray):
+                Image.fromarray(original_img).save(output_path)
             else:
-                return f"Error: Unexpected image type {type(working_image)}"
+                import shutil
+                shutil.copy2(image_path, output_path)
 
-            if is_upscaled:
-                global_state.upscaled[image_path] = output_path
-            return f"Saved base image to {os.path.basename(output_path)}"
+            return f"Saved original to {os.path.basename(output_path)}"
         except Exception as e:
             return f"Save Error: {e}"
 
-    def save_mask_action(image_path, mask_image):
-        """Save mask to output folder with _mask suffix."""
-        if not image_path or mask_image is None:
-            return "No mask to save."
+    def resize_action(image_path, target_short_side):
+        """Resize image to target shortest side (preview only, doesn't save)."""
+        if not image_path:
+            return None, None, "No image selected."
+
+        try:
+            from src.core.upscaling import resize_to_shortest_side
+
+            img = Image.open(image_path).convert("RGB")
+            img = ImageOps.exif_transpose(img)
+            orig_w, orig_h = img.size
+
+            result = resize_to_shortest_side(img, int(target_short_side))
+            new_w, new_h = result.size
+
+            if result.size == img.size:
+                return result, result, f"Image already ≤{int(target_short_side)}px ({orig_w}x{orig_h}). No resize needed."
+            return result, result, f"Resized: {orig_w}x{orig_h} → {new_w}x{new_h}. Click 'Save Resized' to save."
+        except Exception as e:
+            return None, None, f"Resize Error: {e}"
+
+    def save_resized_action(image_path, resized_img):
+        """Save the resized image as JPG."""
+        if not image_path:
+            return "No image selected."
+        if resized_img is None:
+            return "No resized image. Click 'Resize' first."
+
+        try:
+            if isinstance(resized_img, np.ndarray):
+                resized_img = Image.fromarray(resized_img)
+
+            if resized_img.mode != "RGB":
+                resized_img = resized_img.convert("RGB")
+
+            output_path = global_state.get_output_path(image_path, ".jpg")
+            resized_img.save(output_path, "JPEG", quality=98, optimize=True)
+            global_state.upscaled[image_path] = output_path
+
+            file_size = os.path.getsize(output_path) / 1024
+            w, h = resized_img.size
+            return f"Saved {os.path.basename(output_path)} ({w}x{h}, {file_size:.0f} KB)"
+        except Exception as e:
+            return f"Save Error: {e}"
+
+    def save_upscale_action(image_path, upscaled_img):
+        """Save the upscaled image as high-quality JPG for training efficiency."""
+        if not image_path:
+            return "No image selected."
+        if upscaled_img is None:
+            return "No upscaled image. Run upscale first."
+
+        try:
+            # Always save as JPG for training - much smaller files, no quality loss at 98%
+            output_path = global_state.get_output_path(image_path, ".jpg")
+
+            if isinstance(upscaled_img, np.ndarray):
+                upscaled_img = Image.fromarray(upscaled_img)
+
+            # Ensure RGB mode for JPG (no alpha channel)
+            if upscaled_img.mode != "RGB":
+                upscaled_img = upscaled_img.convert("RGB")
+
+            upscaled_img.save(output_path, "JPEG", quality=98, optimize=True)
+
+            global_state.upscaled[image_path] = output_path
+            file_size = os.path.getsize(output_path) / 1024  # KB
+            return f"Saved {os.path.basename(output_path)} ({file_size:.0f} KB)"
+        except Exception as e:
+            return f"Save Error: {e}"
+
+    def save_mask_action(image_path, mask_img):
+        """Save the mask as grayscale PNG to the masks/ subdirectory."""
+        if not image_path:
+            return "No image selected."
+        if mask_img is None:
+            return "No mask. Create mask first."
+
         try:
             base_name = os.path.basename(image_path).rsplit('.', 1)[0]
-            save_path = global_state.get_output_path(image_path, "_mask.png")
-            # get_output_path uses the original extension position, so we need to construct properly
             dummy_path = global_state.get_output_path(image_path, ".txt")
             base_dir = os.path.dirname(dummy_path)
-            save_path = os.path.join(base_dir, base_name + "_mask.png")
-            mask_image.save(save_path)
+            masks_dir = os.path.join(base_dir, "masks")
+            os.makedirs(masks_dir, exist_ok=True)
+            save_path = os.path.join(masks_dir, base_name + "_mask.png")
+
+            if isinstance(mask_img, np.ndarray):
+                mask_img = Image.fromarray(mask_img)
+
+            # Convert to grayscale "L" mode for smaller file size
+            if mask_img.mode != "L":
+                mask_img = mask_img.convert("L")
+
+            mask_img.save(save_path, "PNG", optimize=True)
+
             global_state.masks[image_path] = save_path
-            return f"Saved {base_name}_mask.png"
+            file_size = os.path.getsize(save_path) / 1024
+            return f"Saved {base_name}_mask.png ({file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
 
-    def save_transparent_action(image_path, transparent_image):
-        """Save transparent image to output folder with _transparent suffix."""
-        if not image_path or transparent_image is None:
-            return "No transparent image to save."
+    def save_transparent_action(image_path, transparent_img):
+        """Save the transparent image as WebP lossless to the output directory."""
+        if not image_path:
+            return "No image selected."
+        if transparent_img is None:
+            return "No transparent image. Create transparent first."
+
         try:
             base_name = os.path.basename(image_path).rsplit('.', 1)[0]
             dummy_path = global_state.get_output_path(image_path, ".txt")
             base_dir = os.path.dirname(dummy_path)
-            save_path = os.path.join(base_dir, base_name + "_transparent.png")
-            transparent_image.save(save_path)
+            save_path = os.path.join(base_dir, base_name + "_transparent.webp")
+
+            if isinstance(transparent_img, np.ndarray):
+                transparent_img = Image.fromarray(transparent_img)
+
+            # Ensure RGBA mode for transparency
+            if transparent_img.mode != "RGBA":
+                transparent_img = transparent_img.convert("RGBA")
+
+            # Save as WebP lossless for best quality + compression
+            transparent_img.save(save_path, "WEBP", lossless=True)
+
             global_state.transparent[image_path] = save_path
-            return f"Saved {base_name}_transparent.png"
+            file_size = os.path.getsize(save_path) / 1024
+            return f"Saved {base_name}_transparent.webp ({file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
+
 
     def on_unload_all_models():
         """Unload all models (segmenter and upscaler) to free VRAM."""
@@ -311,7 +464,7 @@ def render_wizard():
         return "All models unloaded from VRAM."
 
     def run_bulk_masks_action(progress=gr.Progress()):
-        """Generate masks for all images."""
+        """Generate grayscale PNG masks for all images."""
         if not global_state.image_paths:
             return "No images loaded."
 
@@ -323,21 +476,27 @@ def render_wizard():
             try:
                 mask = seg.segment(img_path)
                 if mask:
-                    # Save mask to flat output folder
+                    # Convert to grayscale for smaller file size
+                    if mask.mode != "L":
+                        mask = mask.convert("L")
+
+                    # Save mask to masks/ subdirectory
                     dummy_path = global_state.get_output_path(img_path, ".txt")
                     base_dir = os.path.dirname(dummy_path)
+                    masks_dir = os.path.join(base_dir, "masks")
+                    os.makedirs(masks_dir, exist_ok=True)
                     base_name = os.path.basename(img_path).rsplit('.', 1)[0]
-                    save_path = os.path.join(base_dir, base_name + "_mask.png")
-                    mask.save(save_path)
+                    save_path = os.path.join(masks_dir, base_name + "_mask.png")
+                    mask.save(save_path, "PNG", optimize=True)
                     global_state.masks[img_path] = save_path
                     success += 1
             except Exception as e:
                 print(f"Mask error for {img_path}: {e}")
 
-        return f"Generated {success}/{total} masks."
+        return f"Generated {success}/{total} masks (grayscale PNG)."
 
     def run_bulk_transparent_action(progress=gr.Progress()):
-        """Generate transparent images for all images."""
+        """Generate WebP lossless transparent images for all images."""
         if not global_state.image_paths:
             return "No images loaded."
 
@@ -349,12 +508,16 @@ def render_wizard():
             try:
                 img = seg.segment(img_path, return_transparent=True)
                 if img:
-                    # Save to flat output folder
+                    # Ensure RGBA mode for transparency
+                    if img.mode != "RGBA":
+                        img = img.convert("RGBA")
+
+                    # Save as WebP lossless to flat output folder
                     dummy_path = global_state.get_output_path(img_path, ".txt")
                     base_dir = os.path.dirname(dummy_path)
                     base_name = os.path.basename(img_path).rsplit('.', 1)[0]
-                    save_path = os.path.join(base_dir, base_name + "_transparent.png")
-                    img.save(save_path)
+                    save_path = os.path.join(base_dir, base_name + "_transparent.webp")
+                    img.save(save_path, "WEBP", lossless=True)
                     global_state.transparent[img_path] = save_path
                     success += 1
             except Exception as e:
@@ -362,47 +525,57 @@ def render_wizard():
 
         return f"Generated {success}/{total} transparent images."
 
-    def run_bulk_prepare_output(model_name, min_dim, progress=gr.Progress()):
-        """Prepare all images for output - copy or upscale as needed."""
+    def run_bulk_process(model_name, target_short_side, upscale_threshold, passthrough_max, progress=gr.Progress()):
+        """Process all images with conditional routing.
+
+        Routes images based on shortest side dimension:
+        - < upscale_threshold: Upscale with Real-ESRGAN → Lanczos resize to target
+        - upscale_threshold to passthrough_max: Copy as JPG 98% (no resize)
+        - > passthrough_max: Lanczos downscale to target
+
+        Target is based on SHORTEST side, not longest.
+        """
         if not global_state.image_paths:
             return "No images loaded."
 
         total = len(global_state.image_paths)
-        upscaled_count = 0
-        copied_count = 0
+        stats = {"upscaled": 0, "passthrough": 0, "resized": 0}
 
         upscaler = None
-        if model_name:
+        if model_name and model_name != "No models found":
             try:
                 upscaler = get_upscaler(model_name)
             except Exception as e:
                 return f"Error loading upscaler: {e}"
 
-        for img_path in progress.tqdm(global_state.image_paths, desc="Preparing output"):
+        for img_path in progress.tqdm(global_state.image_paths, desc="Processing images"):
             try:
-                # Determine output path (preserve original extension)
-                ext = os.path.splitext(img_path)[1]
-                output_path = global_state.get_output_path(img_path, ext)
+                # Always save as JPG for training efficiency
+                output_path = global_state.get_output_path(img_path, ".jpg")
 
                 # Check if already processed
                 if img_path in global_state.upscaled:
                     continue
 
-                # Check if needs upscaling
-                if upscaler and should_upscale(img_path, min_dim):
-                    result = upscaler.upscale(img_path)
-                    result.save(output_path)
-                    global_state.upscaled[img_path] = output_path
-                    upscaled_count += 1
-                else:
-                    # Just copy the original
-                    import shutil
-                    shutil.copy2(img_path, output_path)
-                    copied_count += 1
-            except Exception as e:
-                print(f"Output prep error for {img_path}: {e}")
+                result, action = process_image(
+                    img_path,
+                    upscaler,
+                    target_short_side=int(target_short_side),
+                    upscale_threshold=int(upscale_threshold),
+                    passthrough_max=int(passthrough_max)
+                )
 
-        return f"Prepared {total} images: {upscaled_count} upscaled, {copied_count} copied."
+                if result.mode != "RGB":
+                    result = result.convert("RGB")
+                result.save(output_path, "JPEG", quality=98, optimize=True)
+                global_state.upscaled[img_path] = output_path
+
+                stats[action.value] += 1
+
+            except Exception as e:
+                print(f"Image processing error for {img_path}: {e}")
+
+        return f"Done: {stats['upscaled']} upscaled, {stats['passthrough']} passthrough, {stats['resized']} resized. All saved as JPG 98%."
 
     def refresh_upscaler_models():
         """Refresh the list of available upscaler models."""
@@ -412,7 +585,7 @@ def render_wizard():
         return gr.update(choices=models, value=models[0])
 
     def get_output_images():
-        """Scan output directory for images (excluding masks, and transparent only if base exists)."""
+        """Scan output directory for images (excluding masks/ subdirectory, and transparent only if base exists)."""
         if not global_state.output_directory or not os.path.isdir(global_state.output_directory):
             return [], {}
 
@@ -421,8 +594,11 @@ def render_wizard():
         images = []
         captions = {}
 
-        # First pass: collect all image filenames
-        for root, _, files in os.walk(global_state.output_directory):
+        # First pass: collect all image filenames (skip masks/ subdirectory)
+        for root, dirs, files in os.walk(global_state.output_directory):
+            # Skip masks subdirectory
+            if 'masks' in dirs:
+                dirs.remove('masks')
             for file in files:
                 if file.lower().endswith(valid_extensions):
                     all_files.add(os.path.join(root, file))
@@ -438,10 +614,14 @@ def render_wizard():
 
             # For transparent files, only include if no base image exists
             if '_transparent.' in file_lower:
-                # Check if base image exists (remove _transparent suffix)
-                base_name = file.replace('_transparent.', '.').replace('_Transparent.', '.')
-                base_path = os.path.join(os.path.dirname(img_path), base_name)
-                if base_path in all_files:
+                # Check if base image exists (try common extensions)
+                base_stem = file.rsplit('_transparent.', 1)[0]
+                dir_path = os.path.dirname(img_path)
+                base_exists = any(
+                    os.path.join(dir_path, base_stem + ext) in all_files
+                    for ext in ['.jpg', '.jpeg', '.png', '.webp']
+                )
+                if base_exists:
                     continue  # Skip - base image exists
 
             images.append(img_path)
@@ -593,102 +773,177 @@ def render_wizard():
 
             # STEP 2: Image Tools (moved before captioning)
             with gr.TabItem("Step 2: Image Tools", id=1) as tab_step_2:
-                gr.Markdown("## Step 2: Masking & Image Tools")
+                gr.Markdown("## Step 2: Image Tools")
 
-                with gr.Accordion("ℹ️ Workflow Guide", open=False):
-                    gr.Markdown("""
-                    ### Workflow
-                    1. **Select an image** from the gallery
-                    2. **Choose base image**: Use original or upscale it
-                    3. **Save base image** to output folder
-                    4. **Optionally** generate mask or transparent version from the base image
-
-                    ### Upscaling
-                    Place Real-ESRGAN `.pth` model files in the `.models/` directory.
-
-                    ### Masks
-                    Masks tell the training script which parts of the image are important.
-                    - **LoRAs**: Optional but recommended to focus on a subject.
-                    - **Full Fine Tune**: Critical to prevent 'background bleeding'.
-                    """)
+                # Hidden states
+                selected_path_state = gr.State()
+                upscaled_image_state = gr.State()
+                resized_image_state = gr.State()
+                mask_image_state = gr.State()
+                transparent_image_state = gr.State()
 
                 with gr.Row():
-                    # Left: Gallery and Bulk Operations
-                    with gr.Column(scale=3):
+                    # COLUMN 1: THE LIBRARY (35%)
+                    with gr.Column(scale=35):
                         step2_gallery = gr.Gallery(
-                            label="Select Image",
+                            label="Image Library",
                             columns=4,
-                            height=800,
+                            height=750,
                             allow_preview=False,
-                            show_label=True
+                            show_label=False
                         )
 
-                        # Status bar - visible position
-                        tool_status = gr.Textbox(label="Status", value="Select an image to begin.", interactive=False)
+                    # COLUMN 2: THE WORKBENCH (65%)
+                    with gr.Column(scale=65):
+                        # Tabs with context-sensitive toolbars
+                        with gr.Tabs() as workbench_tabs:
+                            # TAB 1: ORIGINAL
+                            with gr.TabItem("Original", id="tab_original"):
+                                workbench_original = gr.Image(
+                                    label="Original Image",
+                                    type="pil",
+                                    height=500,
+                                    interactive=False
+                                )
+                                original_status = gr.Textbox(
+                                    label="Status",
+                                    value="Select an image from the library.",
+                                    interactive=False
+                                )
+                                resize_target_slider = gr.Slider(
+                                    label="Resize Target (shortest side, px)",
+                                    minimum=1024,
+                                    maximum=4096,
+                                    value=2048,
+                                    step=64,
+                                    info="For downsizing large images. Use Upscale tab for small images."
+                                )
+                                with gr.Row():
+                                    save_original_btn = gr.Button("Save Original", variant="secondary")
+                                    resize_btn = gr.Button("Resize", variant="secondary")
+                                    save_resized_btn = gr.Button("Save Resized", variant="primary")
 
-                        # Bulk Operations - collapsible
-                        with gr.Accordion("Bulk Operations", open=False):
-                            with gr.Row():
-                                bulk_masks_btn = gr.Button("All Masks")
-                                bulk_transparent_btn = gr.Button("All Transparent")
-                                bulk_upscale_btn = gr.Button("All Upscale")
-                            min_dim_slider = gr.Slider(
-                                label="Min Dimension for Upscaling (px)",
-                                minimum=256,
-                                maximum=2048,
-                                value=1024,
-                                step=64,
-                                info="Images smaller than this will be upscaled"
-                            )
-                            bulk_status = gr.Textbox(label="Bulk Status", interactive=False)
+                            # TAB 2: UPSCALE
+                            with gr.TabItem("Upscale", id="tab_upscale"):
+                                workbench_upscaled = gr.Image(
+                                    label="Upscaled Image",
+                                    type="pil",
+                                    height=500,
+                                    interactive=False
+                                )
+                                upscale_status = gr.Textbox(
+                                    label="Status",
+                                    value="Select an image, then run upscale.",
+                                    interactive=False
+                                )
+                                with gr.Row():
+                                    upscaler_model = gr.Dropdown(
+                                        label="Model",
+                                        choices=get_available_models() or ["No models found"],
+                                        value=get_available_models()[0] if get_available_models() else None,
+                                        scale=2
+                                    )
+                                    refresh_models_btn = gr.Button("↻", scale=0, min_width=40)
+                                target_res_slider = gr.Slider(
+                                    label="Target Resolution (shortest side)",
+                                    minimum=1024,
+                                    maximum=4096,
+                                    value=2048,
+                                    step=64,
+                                    info="Upscales then resizes shortest side to this."
+                                )
+                                with gr.Row():
+                                    run_upscale_btn = gr.Button("Run Upscale", variant="secondary")
+                                    save_upscale_btn = gr.Button("Save Upscale", variant="primary")
 
-                    # Right: Side panel - workflow
-                    with gr.Column(scale=2):
-                        # Hidden states
-                        selected_path_state = gr.State()
-                        working_image_state = gr.State()
-                        is_upscaled_state = gr.State(False)
-                        mask_result_state = gr.State()
-                        transparent_result_state = gr.State()
+                            # TAB 3: MASK
+                            with gr.TabItem("Mask", id="tab_mask"):
+                                workbench_mask = gr.Image(
+                                    label="Mask Preview",
+                                    type="pil",
+                                    height=500,
+                                    interactive=False
+                                )
+                                mask_status = gr.Textbox(
+                                    label="Status",
+                                    value="Select an image, then create mask.",
+                                    interactive=False
+                                )
+                                with gr.Row():
+                                    invert_mask_check = gr.Checkbox(
+                                        label="Invert Mask",
+                                        value=False
+                                    )
+                                with gr.Row():
+                                    create_mask_btn = gr.Button("Create Mask", variant="secondary")
+                                    save_mask_btn = gr.Button("Save Mask", variant="primary")
 
-                        # Image info
-                        selected_info = gr.Textbox(label="Selected Image", interactive=False, lines=2)
+                            # TAB 4: TRANSPARENT
+                            with gr.TabItem("Transparent", id="tab_transparent"):
+                                workbench_transparent = gr.Image(
+                                    label="Transparent Preview",
+                                    type="pil",
+                                    height=500,
+                                    interactive=False
+                                )
+                                transparent_status = gr.Textbox(
+                                    label="Status",
+                                    value="Select an image, then create transparent.",
+                                    interactive=False
+                                )
+                                with gr.Row():
+                                    alpha_threshold_slider = gr.Slider(
+                                        label="Alpha Threshold",
+                                        minimum=0,
+                                        maximum=255,
+                                        value=128,
+                                        step=1
+                                    )
+                                with gr.Row():
+                                    create_transparent_btn = gr.Button("Create Transparent", variant="secondary")
+                                    save_transparent_btn = gr.Button("Save Transparent", variant="primary")
 
-                        # Step 1: Choose base image
-                        gr.Markdown("### 1. Choose Base Image")
-                        with gr.Row():
-                            upscaler_model = gr.Dropdown(
-                                label="Upscaler Model",
-                                choices=get_available_models() or ["No models found"],
-                                value=get_available_models()[0] if get_available_models() else None,
-                                scale=2
-                            )
-                            refresh_models_btn = gr.Button("↻", scale=0, min_width=40)
-                        with gr.Row():
-                            use_original_btn = gr.Button("Use Original", variant="secondary")
-                            upscale_btn = gr.Button("Upscale", variant="primary")
+                        # Unload models button
+                        unload_btn = gr.Button("Unload All Models", variant="secondary", size="sm")
 
-                        # Working image preview
-                        gr.Markdown("### 2. Working Image")
-                        working_preview = gr.Image(label="Base Image", type="pil", height=280, interactive=False)
-                        save_base_btn = gr.Button("Save Base Image to Output", variant="primary")
-
-                        # Step 2: Optional processing
-                        gr.Markdown("### 3. Additional Processing (Optional)")
-                        with gr.Row():
-                            gen_mask_btn = gr.Button("Generate Mask")
-                            gen_transparent_btn = gr.Button("Generate Transparent")
-
-                        with gr.Row():
-                            mask_preview = gr.Image(label="Mask", type="pil", height=200, interactive=False)
-                            transparent_preview = gr.Image(label="Transparent", type="pil", height=200, interactive=False)
-
-                        with gr.Row():
-                            save_mask_btn = gr.Button("Save Mask")
-                            save_transparent_btn = gr.Button("Save Transparent")
-
-                        # Unload button
-                        unload_btn = gr.Button("Unload All Models", variant="secondary")
+                # Bulk Actions Accordion (at bottom, closed by default)
+                with gr.Accordion("Bulk Actions", open=False):
+                    gr.Markdown("""
+                    **Image Processor Routing** (based on shortest side):
+                    - **< Upscale Threshold**: Upscale with Real-ESRGAN → resize to target
+                    - **Threshold to Passthrough Max**: Copy as JPG 98% (no resize)
+                    - **> Passthrough Max**: Lanczos downscale to target
+                    """)
+                    bulk_target_short_side_slider = gr.Slider(
+                        label="Target Shortest Side (px)",
+                        minimum=1024,
+                        maximum=4096,
+                        value=2048,
+                        step=64,
+                        info="Final size for SHORTEST side after processing"
+                    )
+                    with gr.Row():
+                        bulk_upscale_threshold_slider = gr.Slider(
+                            label="Upscale Threshold (px)",
+                            minimum=512,
+                            maximum=2048,
+                            value=1500,
+                            step=64,
+                            info="Images below this get upscaled first"
+                        )
+                        bulk_passthrough_max_slider = gr.Slider(
+                            label="Passthrough Max (px)",
+                            minimum=1500,
+                            maximum=4096,
+                            value=2500,
+                            step=64,
+                            info="Images up to this pass through unchanged"
+                        )
+                    with gr.Row():
+                        bulk_process_btn = gr.Button("Process All", variant="primary")
+                        bulk_masks_btn = gr.Button("Mask All")
+                        bulk_transparent_btn = gr.Button("Transparent All")
+                    bulk_status = gr.Textbox(label="Bulk Status", interactive=False)
 
                 with gr.Row():
                     back_btn_2 = gr.Button("< Back")
@@ -702,7 +957,7 @@ def render_wizard():
                 with gr.Accordion("🤖 Auto-Captioning Tools", open=False):
                     with gr.Row():
                         model_dropdown = gr.Dropdown(
-                            ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption (4-bit Quantized)", "SmilingWolf WD ViT (v3)", "SmilingWolf WD ConvNext (v3)"],
+                            ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "SmilingWolf WD ViT (v3)", "SmilingWolf WD ConvNext (v3)"],
                             label="Select Model",
                             value="SmilingWolf WD ConvNext (v3)",
                             scale=2
@@ -714,8 +969,7 @@ def render_wizard():
                         - **Florence-2 (Base/Large):** ~1.2GB - 2.0GB
                         - **BLIP (Base/Large):** ~1.0GB - 2.0GB
                         - **WD14 (ViT / ConvNext):** < 1GB
-                        - **JoyCaption (4-bit):** ~6GB
-                        - **JoyCaption (BF16):** ~16GB
+                        - **JoyCaption (BF16):** ~22GB (requires high-end GPU)
                         *Note: Requirements are estimates and include model loading overhead.*
                         """)
 
@@ -769,93 +1023,97 @@ def render_wizard():
     # Step 2: Image Tools
     tab_step_2.select(lambda: global_state.image_paths, outputs=step2_gallery)
 
-    # Gallery selection - resets working state
+    # Gallery selection - load image into all workbench tabs
     step2_gallery.select(
         on_gallery_select,
-        outputs=[selected_path_state, selected_info,
-                 working_image_state, mask_result_state, transparent_result_state, tool_status]
-    ).then(
-        lambda: (None, None, None),
-        outputs=[working_preview, mask_preview, transparent_preview]
+        outputs=[
+            selected_path_state,       # path
+            workbench_original,        # original image display
+            original_status,           # original tab status
+            workbench_upscaled,        # existing upscaled (if any)
+            upscale_status,            # upscale tab status
+            workbench_mask,            # existing mask (if any)
+            mask_status,               # mask tab status
+            workbench_transparent,     # existing transparent (if any)
+            transparent_status,        # transparent tab status
+            upscaled_image_state,      # reset upscaled state
+            resized_image_state,       # reset resized state
+            mask_image_state,          # reset mask state
+            transparent_image_state    # reset transparent state
+        ]
     )
 
-    # Use Original button
-    use_original_btn.click(
-        use_original_action,
-        inputs=selected_path_state,
-        outputs=[working_image_state, is_upscaled_state, tool_status]
-    ).then(
-        lambda img: img,
-        inputs=working_image_state,
-        outputs=working_preview
+    # TAB 1: Original - Save, Resize, and Save Resized buttons
+    save_original_btn.click(
+        save_original_action,
+        inputs=[selected_path_state, workbench_original],
+        outputs=original_status
     )
 
-    # Upscale button
-    upscale_btn.click(
+    resize_btn.click(
+        resize_action,
+        inputs=[selected_path_state, resize_target_slider],
+        outputs=[workbench_original, resized_image_state, original_status]
+    )
+
+    save_resized_btn.click(
+        save_resized_action,
+        inputs=[selected_path_state, resized_image_state],
+        outputs=original_status
+    )
+
+    # TAB 2: Upscale - Run and Save buttons
+    run_upscale_btn.click(
         upscale_action,
-        inputs=[selected_path_state, upscaler_model],
-        outputs=[working_image_state, is_upscaled_state, tool_status]
-    ).then(
-        lambda img: img,
-        inputs=working_image_state,
-        outputs=working_preview
+        inputs=[selected_path_state, upscaler_model, target_res_slider],
+        outputs=[workbench_upscaled, upscaled_image_state, upscale_status]
     )
 
-    # Save base image button - use working_preview as source since gr.State may not preserve PIL Images
-    save_base_btn.click(
-        save_working_image,
-        inputs=[selected_path_state, working_preview, is_upscaled_state],
-        outputs=tool_status
+    save_upscale_btn.click(
+        save_upscale_action,
+        inputs=[selected_path_state, workbench_upscaled],
+        outputs=upscale_status
     )
 
-    # Generate Mask button
-    gen_mask_btn.click(
+    refresh_models_btn.click(refresh_upscaler_models, outputs=upscaler_model)
+
+    # TAB 3: Mask - Create and Save buttons
+    create_mask_btn.click(
         generate_mask_action,
-        inputs=working_image_state,
-        outputs=[mask_result_state, tool_status]
-    ).then(
-        lambda img: img,
-        inputs=mask_result_state,
-        outputs=mask_preview
+        inputs=[selected_path_state, workbench_upscaled, resized_image_state, invert_mask_check],
+        outputs=[workbench_mask, mask_image_state, mask_status]
     )
 
-    # Generate Transparent button
-    gen_transparent_btn.click(
-        generate_transparent_action,
-        inputs=working_image_state,
-        outputs=[transparent_result_state, tool_status]
-    ).then(
-        lambda img: img,
-        inputs=transparent_result_state,
-        outputs=transparent_preview
-    )
-
-    # Save Mask button
     save_mask_btn.click(
         save_mask_action,
-        inputs=[selected_path_state, mask_result_state],
-        outputs=tool_status
+        inputs=[selected_path_state, workbench_mask],
+        outputs=mask_status
     )
 
-    # Save Transparent button
+    # TAB 4: Transparent - Create and Save buttons
+    create_transparent_btn.click(
+        generate_transparent_action,
+        inputs=[selected_path_state, workbench_upscaled, resized_image_state, alpha_threshold_slider],
+        outputs=[workbench_transparent, transparent_image_state, transparent_status]
+    )
+
     save_transparent_btn.click(
         save_transparent_action,
-        inputs=[selected_path_state, transparent_result_state],
-        outputs=tool_status
+        inputs=[selected_path_state, workbench_transparent],
+        outputs=transparent_status
     )
 
     # Bulk operations
     bulk_masks_btn.click(run_bulk_masks_action, outputs=bulk_status)
     bulk_transparent_btn.click(run_bulk_transparent_action, outputs=bulk_status)
-    bulk_upscale_btn.click(
-        run_bulk_prepare_output,
-        inputs=[upscaler_model, min_dim_slider],
+    bulk_process_btn.click(
+        run_bulk_process,
+        inputs=[upscaler_model, bulk_target_short_side_slider, bulk_upscale_threshold_slider, bulk_passthrough_max_slider],
         outputs=bulk_status
     )
 
-    # Upscaler settings
-    refresh_models_btn.click(refresh_upscaler_models, outputs=upscaler_model)
-    unload_btn.click(on_unload_all_models, outputs=tool_status)
+    # Unload models
+    unload_btn.click(on_unload_all_models, outputs=original_status)
 
     def go_to_step3():
         """Navigate to Step 3 and refresh output gallery."""
