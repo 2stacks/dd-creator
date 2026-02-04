@@ -1091,18 +1091,18 @@ def render_wizard():
                 transparent_image_state = gr.State()
 
                 with gr.Row():
-                    # COLUMN 1: THE LIBRARY (35%)
-                    with gr.Column(scale=35):
+                    # COLUMN 1: THE LIBRARY (40%)
+                    with gr.Column(scale=40):
                         step2_gallery = gr.Gallery(
                             label="Image Library",
                             columns=4,
-                            height=750,
+                            height=700,
                             allow_preview=False,
                             show_label=False
                         )
 
-                    # COLUMN 2: THE WORKBENCH (65%)
-                    with gr.Column(scale=65):
+                    # COLUMN 2: THE WORKBENCH (60%)
+                    with gr.Column(scale=60):
                         # Tabs with context-sensitive toolbars
                         with gr.Tabs() as workbench_tabs:
                             # TAB 1: ORIGINAL
@@ -1220,8 +1220,7 @@ def render_wizard():
                         # Left column: Smart Processing
                         with gr.Group():
                             gr.Markdown("### Smart Processing (Resize / Upscale)")
-                            gr.Markdown("""Routes images by shortest side:
-- **Passthrough** (between thresholds, saved as 98% JPG)
+                            gr.Markdown("""- **Passthrough** (between thresholds, saved as 98% JPG)
 - **Upscale** (below lower, Real-ESRGAN)
 - **Downscale** (above upper, Lanczos)""")
                             bulk_passthrough_max_slider = gr.Slider(
@@ -1352,25 +1351,25 @@ def render_wizard():
 
                 # Main area: Library (left) and Editor (right)
                 with gr.Row():
-                    # LEFT COLUMN: Library (50%)
-                    with gr.Column(scale=1):
-                        search_filter_box = gr.Textbox(
-                            placeholder="Filter images by caption content...",
-                            show_label=False,
-                            max_lines=1
-                        )
+                    # LEFT COLUMN: Library (40%)
+                    with gr.Column(scale=40):
                         gallery = gr.Gallery(
                             columns=4,
                             height=700,
                             allow_preview=False,
                             show_label=False
                         )
+                        search_filter_box = gr.Textbox(
+                            placeholder="Filter images by caption content...",
+                            show_label=False,
+                            max_lines=1
+                        )
 
-                    # RIGHT COLUMN: Editor (50%)
-                    with gr.Column(scale=1):
+                    # RIGHT COLUMN: Editor (60%)
+                    with gr.Column(scale=60):
                         editor_preview = gr.Image(
                             type="pil",
-                            height=350,
+                            height=500,
                             interactive=False,
                             show_label=False
                         )
@@ -1382,15 +1381,15 @@ def render_wizard():
                         )
 
                         # Hygiene Tools
-                        with gr.Row():
-                            fix_format_btn = gr.Button("Fix Format")
-                            dedup_btn = gr.Button("Dedup Tags")
-                            undo_btn = gr.Button("Undo Changes")
-
                         with gr.Accordion("What do these buttons do?", open=False):
                             gr.Markdown("""- **Fix Format**: Normalize comma spacing and remove empty tags
 - **Dedup Tags**: Remove duplicate tags (case-insensitive)
 - **Undo Changes**: Revert to caption before last edit""")
+
+                        with gr.Row():
+                            fix_format_btn = gr.Button("Fix Format")
+                            dedup_btn = gr.Button("Dedup Tags")
+                            undo_btn = gr.Button("Undo Changes")
 
                         save_status = gr.Textbox(interactive=False, show_label=False, max_lines=1)
 

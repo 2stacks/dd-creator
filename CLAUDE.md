@@ -49,7 +49,7 @@ src/
 
 ## Step 2: Image Tools UI Structure
 
-The Image Tools step has two main areas:
+Two-column layout (40/60 split) with gallery height=700 and image viewer height=500.
 
 **Workbench (per-image editing):**
 - Original tab: View/resize/save individual images
@@ -65,18 +65,20 @@ Gallery selection resets workbench to Original tab. All save buttons use `varian
 
 ## Step 3: Captioning UI Structure
 
-The Captioning step has three main areas:
+Two-column layout (40/60 split) with gallery height=700 and image preview height=500.
 
 **Batch Generation accordion (open by default):**
-- Model dropdown + Threshold slider (WD14 only)
+- Left column: Model dropdown (sorted alphabetically) + collapsible VRAM Requirements accordion
+- Right column: Threshold slider (WD14 only) + Filter rating tags checkbox (on by default)
 - Prefix/Suffix textboxes for static tags applied to all captions
 - "Generate Tags for All Images" button
 
-**Main area (two-column layout, 50/50 split):**
-- Left column: Search/filter textbox + Gallery (4x4 grid, height=700)
-- Right column: Image preview + Caption editor (6 lines) + Hygiene tools + Save & Next button
+**Main area (two-column layout, 40/60 split):**
+- Left column: Gallery (4x4 grid, height=700) + Search/filter textbox below
+- Right column: Image preview (height=500) + Caption editor (6 lines) + Hygiene tools + Save & Next button
 
 **Hygiene tools:**
+- Collapsible help accordion explaining button functions (above buttons)
 - Fix Format: Normalize comma spacing, remove empty tags
 - Dedup Tags: Remove duplicate tags (case-insensitive)
 - Undo Changes: Revert to caption before last hygiene action
@@ -85,6 +87,8 @@ The Captioning step has three main areas:
 - Add Tags: Prepend/Append radio + tags input + Add to All button
 - Remove Tags: Comma-separated tags input + Remove from All button
 - Search & Replace: Exact/Partial match radio + semicolon-separated pairs + Replace All button
+
+**Rating Tag Filtering:** Filters Danbooru rating tags during batch generation. Removes prefixed tags (rating:general, etc.) anywhere, and standalone tags (general, sensitive, questionable, explicit) from first/last position only.
 
 Gallery filtering tracks displayed images separately (`_displayed_images`) so selection works correctly with filtered results.
 

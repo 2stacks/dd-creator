@@ -67,6 +67,7 @@ The wizard guides you through 4 steps:
 2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Generate and edit captions with powerful tools:
    - Batch generation with prefix/suffix tags (trigger words, quality tags)
+   - Automatic Danbooru rating tag filtering (optional, on by default)
    - Search/filter images by caption content
    - Hygiene tools: fix formatting, deduplicate tags, undo changes
    - Bulk operations: add/remove tags, search & replace across all captions
