@@ -965,7 +965,35 @@ def render_wizard():
             pairs_str += f"... (+{len(pairs) - 2} more)"
         return f"Applied [{pairs_str}] to {count} captions."
 
-    def run_output_captioning_action(model_name, threshold, prefix_tags, suffix_tags, progress=gr.Progress()):
+    # Danbooru rating tags to filter (with "rating:" prefix)
+    RATING_TAGS_PREFIXED = {"rating:general", "rating:sensitive", "rating:questionable", "rating:explicit"}
+    # Standalone rating tags (only filtered at start/end of caption)
+    RATING_TAGS_STANDALONE = {"general", "sensitive", "questionable", "explicit"}
+
+    def filter_rating_tags(tags):
+        """Filter rating tags from a list of tags.
+
+        - Always removes 'rating:*' prefixed tags anywhere
+        - Removes standalone rating words only from first/last position
+        """
+        if not tags:
+            return tags
+
+        # First pass: remove all prefixed rating tags
+        tags = [t for t in tags if t.lower() not in RATING_TAGS_PREFIXED]
+
+        if not tags:
+            return tags
+
+        # Second pass: remove standalone rating tags from first/last position
+        while tags and tags[0].lower() in RATING_TAGS_STANDALONE:
+            tags = tags[1:]
+        while tags and tags[-1].lower() in RATING_TAGS_STANDALONE:
+            tags = tags[:-1]
+
+        return tags
+
+    def run_output_captioning_action(model_name, threshold, prefix_tags, suffix_tags, filter_ratings, progress=gr.Progress()):
         """Generate captions for all output images."""
         if not _output_images:
             return "No images in output directory."
@@ -984,6 +1012,12 @@ def render_wizard():
                         cap = captioner.generate_caption(img_path, threshold=threshold)
                     else:
                         cap = captioner.generate_caption(img_path)
+
+                    # Filter out rating tags if enabled
+                    if filter_ratings and cap:
+                        tags = [t.strip() for t in cap.split(",") if t.strip()]
+                        tags = filter_rating_tags(tags)
+                        cap = ", ".join(tags)
 
                     # Build final caption with prefix and suffix
                     parts = []
@@ -1250,7 +1284,7 @@ def render_wizard():
 
             # STEP 3: Captioning (moved after image tools)
             with gr.TabItem("Step 3: Captioning", id=2) as tab_step_3:
-                gr.Markdown("## Step 3: Captioning & Review")
+                gr.Markdown("## Step 3: Captioning")
 
                 # Hidden states
                 current_path_state = gr.State()
@@ -1260,20 +1294,46 @@ def render_wizard():
                 # PHASE 1: Batch Generation (Accordion, Open by Default)
                 with gr.Accordion("Batch Generation", open=True):
                     with gr.Row():
-                        model_dropdown = gr.Dropdown(
-                            ["SmilingWolf WD ConvNext (v3)", "SmilingWolf WD ViT (v3)", "Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption Quantized (8-bit)"],
-                            label="Model",
-                            value="SmilingWolf WD ConvNext (v3)",
-                            scale=7
-                        )
-                        threshold_slider = gr.Slider(
-                            label="Threshold (WD14 only)",
-                            minimum=0.0,
-                            maximum=1.0,
-                            value=0.35,
-                            step=0.05,
-                            scale=3
-                        )
+                        # Left column: Model selector (50%)
+                        with gr.Column(scale=1):
+                            model_dropdown = gr.Dropdown(
+                                [
+                                    "BLIP-Base",
+                                    "BLIP-Large",
+                                    "Florence-2-Base",
+                                    "Florence-2-Large",
+                                    "JoyCaption (Beta One)",
+                                    "JoyCaption Quantized (8-bit)",
+                                    "SmilingWolf WD ConvNext (v3)",
+                                    "SmilingWolf WD ViT (v3)",
+                                ],
+                                label="Model",
+                                value="SmilingWolf WD ConvNext (v3)"
+                            )
+                            with gr.Accordion("🖥️ VRAM Requirements", open=False):
+                                gr.Markdown("""
+- **SmilingWolf WD14 (ViT/ConvNext):** ~2GB VRAM. Fast Danbooru-style tagging using ONNX runtime. Best for anime/illustration.
+- **BLIP-Base:** ~2GB VRAM. Natural language captions, good general purpose.
+- **BLIP-Large:** ~4GB VRAM. More detailed natural language captions.
+- **Florence-2-Base:** ~4GB VRAM. Microsoft's vision model, detailed scene descriptions.
+- **Florence-2-Large:** ~4GB VRAM. More detailed than base, similar VRAM usage.
+- **JoyCaption Quantized (8-bit):** ~12-16GB VRAM. High quality captions, requires 16GB+ GPU.
+- **JoyCaption (Beta One):** ~17GB VRAM. Full BF16 precision, requires 20GB+ GPU (RTX 3090/4090).
+""")
+                        # Right column: Threshold and Filter (50%)
+                        with gr.Column(scale=1):
+                            threshold_slider = gr.Slider(
+                                label="Threshold (WD14 only)",
+                                minimum=0.0,
+                                maximum=1.0,
+                                value=0.35,
+                                step=0.05,
+                                info="Lower = more tags, higher = fewer but more confident tags"
+                            )
+                            filter_ratings_check = gr.Checkbox(
+                                label="Filter rating tags (general, sensitive, questionable, explicit)",
+                                value=True
+                            )
                     with gr.Row():
                         prefix_tags_box = gr.Textbox(
                             label="Prefix (Prepend)",
@@ -1516,7 +1576,7 @@ def render_wizard():
     # Step 3: Captioning (uses output directory images)
     caption_btn.click(
         run_output_captioning_action,
-        inputs=[model_dropdown, threshold_slider, prefix_tags_box, suffix_tags_box],
+        inputs=[model_dropdown, threshold_slider, prefix_tags_box, suffix_tags_box, filter_ratings_check],
         outputs=progress_bar
     )
 
