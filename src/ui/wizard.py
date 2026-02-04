@@ -13,61 +13,141 @@ from src.core.upscaling import (
 )
 
 def render_wizard():
-    # --- HELPER FUNCTIONS (Logic isolated from UI Layout) ---
-    
-    def browse_directory(initial_path=None):
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            
-            # Resolve starting directory
-            start_dir = os.getcwd()
-            if initial_path:
-                temp_path = os.path.abspath(initial_path)
-                # Traverse up until we find a directory that exists
-                while temp_path and not os.path.exists(temp_path):
-                    parent = os.path.dirname(temp_path)
-                    if parent == temp_path: # Prevent infinite loop at root
-                        break
-                    temp_path = parent
-                
-                if os.path.exists(temp_path) and os.path.isdir(temp_path):
-                    start_dir = temp_path
-            
-            directory = filedialog.askdirectory(initialdir=start_dir)
-            root.destroy()
-            return directory if directory else initial_path
-        except Exception as e:
-            print(f"Browse error: {e}")
-            return initial_path
+    # Ensure default directories exist for FileExplorer components
+    os.makedirs("datasets/input", exist_ok=True)
+    os.makedirs("datasets/output", exist_ok=True)
 
-    def scan_action(path, output_path, project_name):
-        if not path or not os.path.isdir(path):
-            return "Please select a valid directory.", gr.update(interactive=False)
-        
-        # Combine output path with project name if provided
-        final_output_path = output_path
+    # --- HELPER FUNCTIONS (Logic isolated from UI Layout) ---
+
+    def on_explorer_select(selected):
+        """Handle FileExplorer selection - convert to relative path for textbox."""
+        if not selected:
+            return gr.update()
+        # FileExplorer returns a list of selected paths
+        if isinstance(selected, list):
+            selected = selected[0] if selected else ""
+        if not selected:
+            return gr.update()
+
+        path = selected
+        # If a file was selected, use parent directory
+        if os.path.isfile(path):
+            path = os.path.dirname(path)
+
+        # Convert absolute path to relative path
+        cwd = os.getcwd()
+        if os.path.isabs(path) and path.startswith(cwd):
+            path = os.path.relpath(path, cwd)
+
+        return path
+
+    def handle_upload(files, local_folder):
+        """Handle file upload - copy images to local folder or auto-created staging directory.
+
+        If local_folder is set to something other than the default (datasets/input),
+        uploads go directly into that folder. Otherwise a new timestamped folder
+        is created under datasets/input/uploads/.
+        """
+        import shutil
+        from datetime import datetime
+
+        if not files:
+            return "", "No files uploaded."
+
+        # Determine upload destination
+        default_source = "datasets/input"
+        if local_folder and local_folder.strip() and local_folder.strip() != default_source:
+            upload_dir = local_folder.strip()
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            upload_dir = os.path.join("datasets", "input", "uploads", f"upload_{timestamp}")
+
+        os.makedirs(upload_dir, exist_ok=True)
+
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
+        copied = 0
+
+        for file_path in files:
+            if not file_path:
+                continue
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in valid_extensions:
+                dest = os.path.join(upload_dir, os.path.basename(file_path))
+                shutil.copy2(file_path, dest)
+                copied += 1
+
+        if copied == 0:
+            return "", "No valid images found. Supported: PNG, JPG, JPEG, WebP, BMP"
+
+        return upload_dir, f"Uploaded {copied} images to {upload_dir}"
+
+    def to_relative_path(path):
+        """Convert absolute path to relative path if within cwd."""
+        if not path:
+            return path
+        cwd = os.getcwd()
+        if os.path.isabs(path) and path.startswith(cwd):
+            return os.path.relpath(path, cwd)
+        return path
+
+    def scan_action_unified(local_input, upload_staging, project_name, existing_output):
+        """Unified scan action - determines source and output from field values.
+
+        Source priority: upload_staging (if populated) > local_input
+        Output priority: project_name (creates new) > existing_output
+        """
+        DEFAULT_SOURCE = "datasets/input"
+        DEFAULT_OUTPUT = "datasets/output"
+
+        # --- Determine source path ---
+        # Upload staging takes priority, but only if local_input is still the default
+        # (if user explicitly set a local path, respect that over old uploads)
+        if upload_staging and os.path.isdir(upload_staging) and os.listdir(upload_staging):
+            if local_input.strip() == DEFAULT_SOURCE:
+                source_path = upload_staging
+            else:
+                source_path = local_input
+        else:
+            source_path = local_input
+
+        if not source_path or not os.path.isdir(source_path):
+            return "Please select a valid source directory or upload images.", gr.update(interactive=False)
+
+        # --- Determine output path ---
+        # Project name takes priority (creates new subfolder)
+        # Otherwise use existing_output if it's not the bare default
+        output_created = False
         if project_name and project_name.strip():
-            final_output_path = os.path.join(output_path, project_name.strip())
+            final_output_path = os.path.join("datasets/output", project_name.strip())
+        elif existing_output and existing_output.strip() and existing_output.strip() != DEFAULT_OUTPUT:
+            final_output_path = existing_output.strip()
+        else:
+            final_output_path = DEFAULT_OUTPUT
 
         # Create output dir if it doesn't exist
-        if final_output_path and not os.path.exists(final_output_path):
+        if not os.path.exists(final_output_path):
             try:
                 os.makedirs(final_output_path, exist_ok=True)
+                output_created = True
             except Exception as e:
                 return f"Error creating output directory: {e}", gr.update(interactive=False)
 
-        msg = global_state.scan_directory(path, final_output_path)
+        global_state.scan_directory(source_path, final_output_path)
         count = len(global_state.image_paths)
-        
-        # Add a note about where files are saving if it's different from source
-        if final_output_path and os.path.abspath(final_output_path) != os.path.abspath(path):
-            msg += f"\nOutput Directory: {os.path.abspath(final_output_path)}"
-            
-        return msg, gr.update(interactive=(count > 0))
+
+        # Build three-line status message with relative paths
+        source_rel = to_relative_path(source_path)
+        output_rel = to_relative_path(final_output_path)
+
+        lines = []
+        lines.append(f"Source: {source_rel}")
+        lines.append(f"Found {count} images")
+        if output_created:
+            lines.append(f"Output: {output_rel} (created)")
+        else:
+            lines.append(f"Output: {output_rel}")
+
+        return "\n".join(lines), gr.update(interactive=(count > 0))
 
     def run_captioning_action(model_name, progress=gr.Progress()):
         if not global_state.image_paths:
@@ -1048,35 +1128,87 @@ def render_wizard():
     with gr.Column() as wizard_container:
         with gr.Tabs(elem_id="wizard_tabs", selected=0) as tabs:
             
-            # STEP 1
-            with gr.TabItem("Step 1: Import", id=0):
-                gr.Markdown("## Step 1: Select Dataset Directories")
-                gr.Markdown("Define where your source images are located and where you want generated files (captions, masks) to be saved.")
-                
-                with gr.Group():
-                    with gr.Row():
-                        input_dir = gr.Textbox(label="Source Image Directory", placeholder="Path to source images", value="datasets/input", scale=4)
-                        browse_input_btn = gr.Button("📂 Browse", scale=1)
-                    
-                    with gr.Row():
-                        output_dir = gr.Textbox(
-                            label="Base Output Directory", 
-                            placeholder="Path to save results", 
-                            value="datasets/output", 
-                            scale=4,
-                            info="If this folder does not exist, it will be created automatically when you click Scan."
-                        )
-                        browse_output_btn = gr.Button("📂 Browse", scale=1)
-                    
-                    with gr.Row():
-                        project_name = gr.Textbox(
-                            label="Project Name / Subfolder (Optional)", 
-                            placeholder="e.g. my_new_dataset", 
-                            info="Appends to the Base Output Directory. Useful for organizing different experiments."
-                        )
+            # STEP 1: Project Setup
+            with gr.TabItem("Step 1: Project Setup", id=0):
+                gr.Markdown("## Step 1: Project Setup")
 
-                scan_btn = gr.Button("Scan & Initialize", variant="primary")
-                scan_output = gr.Textbox(label="Status", interactive=False)
+                # Hidden states
+                upload_staging_state = gr.State("")
+
+                with gr.Row():
+                    # COLUMN 1: SOURCE DATA (Input) - 50%
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Source Data")
+                        with gr.Tabs() as source_tabs:
+                            # Local Folder Tab
+                            with gr.TabItem("Local Folder", id="local_folder"):
+                                input_dir = gr.Textbox(
+                                    label="Path to Source Images",
+                                    placeholder="Path to source images",
+                                    value="datasets/input"
+                                )
+                                with gr.Accordion("Browse Directories", open=False):
+                                    gr.Markdown("*Click any file to select its containing folder.*")
+                                    input_explorer = gr.FileExplorer(
+                                        root_dir="datasets/input",
+                                        glob="**/*",
+                                        file_count="single",
+                                        height=250
+                                    )
+
+                            # Upload Tab
+                            with gr.TabItem("Upload", id="upload"):
+                                upload_input = gr.File(
+                                    file_count="multiple",
+                                    file_types=["image"],
+                                    label="Upload Images"
+                                )
+                                upload_status = gr.Textbox(
+                                    label="Upload Status",
+                                    interactive=False,
+                                    value="Select image files to upload."
+                                )
+
+                    # COLUMN 2: WORKSPACE (Output) - 50%
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Workspace")
+                        with gr.Tabs() as workspace_tabs:
+                            # New Project Tab
+                            with gr.TabItem("New Project", id="new_project"):
+                                project_name = gr.Textbox(
+                                    label="Project Name",
+                                    placeholder="e.g. my_awesome_dataset"
+                                )
+                                gr.Markdown("*Will create: datasets/output/[project_name]/*")
+
+                            # Continue Existing Tab
+                            with gr.TabItem("Continue Existing", id="continue_existing"):
+                                output_dir = gr.Textbox(
+                                    label="Output Directory",
+                                    placeholder="Path to existing output folder",
+                                    value="datasets/output"
+                                )
+                                with gr.Accordion("Browse Existing Projects", open=False):
+                                    gr.Markdown("*Click any file to select its containing folder.*")
+                                    output_explorer = gr.FileExplorer(
+                                        root_dir="datasets/output",
+                                        glob="**/*",
+                                        file_count="single",
+                                        height=250
+                                    )
+
+                # Full-width Scan Button
+                scan_btn = gr.Button("Scan & Initialize Project", variant="primary", size="lg")
+
+                # Collapsible Console Log
+                with gr.Accordion("Console Log", open=True):
+                    scan_output = gr.Textbox(
+                        show_label=False,
+                        interactive=False,
+                        lines=3,
+                        placeholder="Ready to scan..."
+                    )
+
                 next_btn_1 = gr.Button("Next >", interactive=False)
 
             # STEP 2: Image Tools (moved before captioning)
@@ -1461,10 +1593,27 @@ def render_wizard():
 
     # --- EVENT BINDINGS (Wired at the end to ensure all components exist) ---
 
-    # Step 1: Import
-    browse_input_btn.click(browse_directory, inputs=input_dir, outputs=input_dir)
-    browse_output_btn.click(browse_directory, inputs=output_dir, outputs=output_dir)
-    scan_btn.click(scan_action, inputs=[input_dir, output_dir, project_name], outputs=[scan_output, next_btn_1])
+    # Step 1: Project Setup
+
+    # FileExplorer → Textbox updates
+    input_explorer.change(on_explorer_select, inputs=input_explorer, outputs=input_dir)
+    output_explorer.change(on_explorer_select, inputs=output_explorer, outputs=output_dir)
+
+    # File upload handling (uses local folder path as destination if set)
+    upload_input.upload(
+        handle_upload,
+        inputs=[upload_input, input_dir],
+        outputs=[upload_staging_state, upload_status]
+    )
+
+    # Unified scan
+    scan_btn.click(
+        scan_action_unified,
+        inputs=[input_dir, upload_staging_state, project_name, output_dir],
+        outputs=[scan_output, next_btn_1]
+    )
+
+    # Navigation
     next_btn_1.click(lambda: gr.Tabs(selected=1), outputs=tabs)
 
     # Step 2: Image Tools

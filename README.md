@@ -63,7 +63,7 @@ Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directo
 
 The wizard guides you through 4 steps:
 
-1. **Import** - Select source directory and output location
+1. **Project Setup** - Two-column layout to configure source data (local folder or browser upload) and workspace (new project or continue existing)
 2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Generate and edit captions with powerful tools:
    - Batch generation with prefix/suffix tags (trigger words, quality tags)

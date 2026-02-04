@@ -47,6 +47,43 @@ src/
 - Model cache: `.hf_cache/` directory (HuggingFace models)
 - Upscaler models: `.models/` directory for user-provided `.pth`/`.safetensors` files
 
+## Step 1: Project Setup UI Structure
+
+Two-column layout with tabbed sections for source data and workspace configuration.
+
+**Layout:** Two equal columns (50/50 split)
+
+**Column 1: Source Data (Input)**
+- Tabs: "Local Folder" | "Upload"
+- Local Folder tab:
+  - Path to Source Images textbox (default: `datasets/input`)
+  - "Browse Directories" accordion with FileExplorer
+- Upload tab:
+  - gr.File component (file_count="multiple") for uploading individual files or entire folders
+  - Upload status textbox
+
+**Column 2: Workspace (Output)**
+- Tabs: "New Project" | "Continue Existing"
+- New Project tab:
+  - Project Name textbox
+  - Info text showing path that will be created
+- Continue Existing tab:
+  - Output Directory textbox
+  - "Browse Existing Projects" accordion with FileExplorer
+
+**Common Elements:**
+- Full-width "Scan & Initialize Project" button (primary, large)
+- Collapsible "Console Log" accordion with status textbox
+- "Next >" navigation button
+
+**FileExplorer Usage:** Each explorer starts in its default directory (`datasets/input` or `datasets/output`) and shows files. Clicking any file selects its containing directory. Directories are created automatically if they don't exist.
+
+**Upload Staging:** If the Local Folder path is set to a custom directory, uploads go directly into that folder. If it's the default (`datasets/input`), a new timestamped folder is created at `datasets/input/uploads/upload_<timestamp>/`. This lets users accumulate images in a chosen folder across multiple upload sessions.
+
+**Scan Logic (value-based, no tab state tracking):**
+- Source: Uses upload staging only if local folder is still the default. A custom local folder path always takes priority.
+- Output: Project Name (creates `datasets/output/<name>/`) > existing Output Directory > fallback to `datasets/output/`.
+
 ## Step 2: Image Tools UI Structure
 
 Two-column layout (40/60 split) with gallery height=700 and image viewer height=500.
