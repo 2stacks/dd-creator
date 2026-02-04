@@ -182,7 +182,7 @@ def render_wizard():
                 except:
                     pass
 
-            # Return: path, original_img, status for each tab, existing processed images, reset states
+            # Return: path, original_img, status for each tab, existing processed images, reset states, tab selection
             return (
                 path,                    # selected_path_state
                 img,                     # workbench_original
@@ -196,10 +196,12 @@ def render_wizard():
                 None,                    # upscaled_image_state (reset)
                 None,                    # resized_image_state (reset)
                 None,                    # mask_image_state (reset)
-                None                     # transparent_image_state (reset)
+                None,                    # transparent_image_state (reset)
+                gr.Tabs(selected="tab_original")  # Reset to Original tab
             )
         return (None, None, "Select an image from the library.", None, "Select an image first.",
-                None, "Select an image first.", None, "Select an image first.", None, None, None, None)
+                None, "Select an image first.", None, "Select an image first.", None, None, None, None,
+                gr.Tabs(selected="tab_original"))
 
     def upscale_action(image_path, model_name, target_resolution):
         """Upscale the image with smart resize for training.
@@ -463,7 +465,7 @@ def render_wizard():
             torch.cuda.empty_cache()
         return "All models unloaded from VRAM."
 
-    def run_bulk_masks_action(progress=gr.Progress()):
+    def run_bulk_masks_action(invert_mask, progress=gr.Progress()):
         """Generate grayscale PNG masks for all images."""
         if not global_state.image_paths:
             return "No images loaded."
@@ -480,6 +482,10 @@ def render_wizard():
                     if mask.mode != "L":
                         mask = mask.convert("L")
 
+                    # Invert if requested
+                    if invert_mask:
+                        mask = ImageOps.invert(mask)
+
                     # Save mask to masks/ subdirectory
                     dummy_path = global_state.get_output_path(img_path, ".txt")
                     base_dir = os.path.dirname(dummy_path)
@@ -495,7 +501,7 @@ def render_wizard():
 
         return f"Generated {success}/{total} masks (grayscale PNG)."
 
-    def run_bulk_transparent_action(progress=gr.Progress()):
+    def run_bulk_transparent_action(alpha_threshold, progress=gr.Progress()):
         """Generate WebP lossless transparent images for all images."""
         if not global_state.image_paths:
             return "No images loaded."
@@ -511,6 +517,13 @@ def render_wizard():
                     # Ensure RGBA mode for transparency
                     if img.mode != "RGBA":
                         img = img.convert("RGBA")
+
+                    # Apply alpha threshold if not default
+                    if alpha_threshold != 128:
+                        # Get alpha channel and apply threshold
+                        r, g, b, a = img.split()
+                        a = a.point(lambda x: 255 if x > alpha_threshold else 0)
+                        img = Image.merge("RGBA", (r, g, b, a))
 
                     # Save as WebP lossless to flat output folder
                     dummy_path = global_state.get_output_path(img_path, ".txt")
@@ -576,6 +589,36 @@ def render_wizard():
                 print(f"Image processing error for {img_path}: {e}")
 
         return f"Done: {stats['upscaled']} upscaled, {stats['passthrough']} passthrough, {stats['resized']} resized. All saved as JPG 98%."
+
+    def run_bulk_copy(progress=gr.Progress()):
+        """Copy all source images to output folder unchanged.
+
+        Simply copies each source image to the output directory without any
+        processing, preserving the original format and quality.
+        """
+        if not global_state.image_paths:
+            return "No images loaded."
+
+        import shutil
+        total = len(global_state.image_paths)
+        success = 0
+
+        for img_path in progress.tqdm(global_state.image_paths, desc="Copying images"):
+            try:
+                # Skip if already copied
+                if img_path in global_state.upscaled:
+                    continue
+
+                # Get original extension and copy
+                ext = os.path.splitext(img_path)[1]
+                output_path = global_state.get_output_path(img_path, ext)
+                shutil.copy2(img_path, output_path)
+                global_state.upscaled[img_path] = output_path
+                success += 1
+            except Exception as e:
+                print(f"Copy error for {img_path}: {e}")
+
+        return f"Copied {success}/{total} images to output folder."
 
     def refresh_upscaler_models():
         """Refresh the list of available upscaler models."""
@@ -819,7 +862,7 @@ def render_wizard():
                                     info="For downsizing large images. Use Upscale tab for small images."
                                 )
                                 with gr.Row():
-                                    save_original_btn = gr.Button("Save Original", variant="secondary")
+                                    save_original_btn = gr.Button("Save Original", variant="primary")
                                     resize_btn = gr.Button("Resize", variant="secondary")
                                     save_resized_btn = gr.Button("Save Resized", variant="primary")
 
@@ -841,9 +884,11 @@ def render_wizard():
                                         label="Model",
                                         choices=get_available_models() or ["No models found"],
                                         value=get_available_models()[0] if get_available_models() else None,
-                                        scale=2
+                                        scale=1
                                     )
-                                    refresh_models_btn = gr.Button("↻", scale=0, min_width=40)
+                                    with gr.Column(scale=1):
+                                        refresh_models_btn = gr.Button("↻ Refresh Model List")
+                                        unload_btn = gr.Button("⏏ Unload All Models", variant="secondary")
                                 target_res_slider = gr.Slider(
                                     label="Target Resolution (shortest side)",
                                     minimum=1024,
@@ -903,47 +948,70 @@ def render_wizard():
                                     create_transparent_btn = gr.Button("Create Transparent", variant="secondary")
                                     save_transparent_btn = gr.Button("Save Transparent", variant="primary")
 
-                        # Unload models button
-                        unload_btn = gr.Button("Unload All Models", variant="secondary", size="sm")
-
                 # Bulk Actions Accordion (at bottom, closed by default)
                 with gr.Accordion("Bulk Actions", open=False):
-                    gr.Markdown("""
-                    **Image Processor Routing** (based on shortest side):
-                    - **< Upscale Threshold**: Upscale with Real-ESRGAN → resize to target
-                    - **Threshold to Passthrough Max**: Copy as JPG 98% (no resize)
-                    - **> Passthrough Max**: Lanczos downscale to target
-                    """)
-                    bulk_target_short_side_slider = gr.Slider(
-                        label="Target Shortest Side (px)",
-                        minimum=1024,
-                        maximum=4096,
-                        value=2048,
-                        step=64,
-                        info="Final size for SHORTEST side after processing"
-                    )
+
                     with gr.Row():
-                        bulk_upscale_threshold_slider = gr.Slider(
-                            label="Upscale Threshold (px)",
-                            minimum=512,
-                            maximum=2048,
-                            value=1500,
-                            step=64,
-                            info="Images below this get upscaled first"
-                        )
-                        bulk_passthrough_max_slider = gr.Slider(
-                            label="Passthrough Max (px)",
-                            minimum=1500,
-                            maximum=4096,
-                            value=2500,
-                            step=64,
-                            info="Images up to this pass through unchanged"
-                        )
-                    with gr.Row():
-                        bulk_process_btn = gr.Button("Process All", variant="primary")
-                        bulk_masks_btn = gr.Button("Mask All")
-                        bulk_transparent_btn = gr.Button("Transparent All")
-                    bulk_status = gr.Textbox(label="Bulk Status", interactive=False)
+                        # Left column: Smart Processing
+                        with gr.Group():
+                            gr.Markdown("### Smart Processing (Resize / Upscale)")
+                            gr.Markdown("""Routes images by shortest side:
+- **Passthrough** (between thresholds, saved as 98% JPG)
+- **Upscale** (below lower, Real-ESRGAN)
+- **Downscale** (above upper, Lanczos)""")
+                            bulk_passthrough_max_slider = gr.Slider(
+                                label="Passthrough Upper Limit (px)",
+                                minimum=1500,
+                                maximum=4096,
+                                value=2500,
+                                step=64,
+                                info="Images with shortest side ABOVE this will be downscaled to target"
+                            )
+                            bulk_upscale_threshold_slider = gr.Slider(
+                                label="Upscale Lower Limit (px)",
+                                minimum=512,
+                                maximum=2048,
+                                value=1500,
+                                step=64,
+                                info="Images with shortest side BELOW this will be upscaled then resized to target"
+                            )
+                            bulk_target_short_side_slider = gr.Slider(
+                                label="Resize Target (shortest side, px)",
+                                minimum=1024,
+                                maximum=4096,
+                                value=2048,
+                                step=64,
+                                info="Target size for upscaled or downscaled images (passthrough images are unchanged)"
+                            )
+                            bulk_process_btn = gr.Button("Run Smart Process All", variant="primary")
+
+                        # Right column: Mask, Background Removal, Bypass
+                        with gr.Column():
+                            with gr.Group():
+                                gr.Markdown("### Mask Generation")
+                                gr.Markdown("Create grayscale segmentation masks for all output images (saved to `masks/` subfolder).")
+                                bulk_invert_mask_check = gr.Checkbox(label="Invert Masks", value=False)
+                                bulk_masks_btn = gr.Button("Generate Masks for All", variant="primary")
+
+                            with gr.Group():
+                                gr.Markdown("### Background Removal")
+                                gr.Markdown("Remove backgrounds and save as lossless WebP with transparency.")
+                                bulk_alpha_threshold_slider = gr.Slider(
+                                    label="Alpha Threshold",
+                                    minimum=0,
+                                    maximum=255,
+                                    value=128,
+                                    step=1,
+                                    info="Threshold for alpha channel cutoff"
+                                )
+                                bulk_transparent_btn = gr.Button("Remove Backgrounds for All", variant="primary")
+
+                            with gr.Group():
+                                gr.Markdown("### Bypass Editing for All Images")
+                                gr.Markdown("Skip all image processing and copy source images directly to the output folder unchanged for captioning.")
+                                bulk_copy_btn = gr.Button("Copy All Source Images to Output", variant="primary")
+
+                    bulk_status = gr.Textbox(label="Status", value="Ready...", interactive=False)
 
                 with gr.Row():
                     back_btn_2 = gr.Button("< Back")
@@ -1025,7 +1093,7 @@ def render_wizard():
     # Step 2: Image Tools
     tab_step_2.select(lambda: global_state.image_paths, outputs=step2_gallery)
 
-    # Gallery selection - load image into all workbench tabs
+    # Gallery selection - load image into all workbench tabs and reset to Original tab
     step2_gallery.select(
         on_gallery_select,
         outputs=[
@@ -1041,7 +1109,8 @@ def render_wizard():
             upscaled_image_state,      # reset upscaled state
             resized_image_state,       # reset resized state
             mask_image_state,          # reset mask state
-            transparent_image_state    # reset transparent state
+            transparent_image_state,   # reset transparent state
+            workbench_tabs             # reset to Original tab
         ]
     )
 
@@ -1106,16 +1175,17 @@ def render_wizard():
     )
 
     # Bulk operations
-    bulk_masks_btn.click(run_bulk_masks_action, outputs=bulk_status)
-    bulk_transparent_btn.click(run_bulk_transparent_action, outputs=bulk_status)
+    bulk_copy_btn.click(run_bulk_copy, outputs=bulk_status)
+    bulk_masks_btn.click(run_bulk_masks_action, inputs=bulk_invert_mask_check, outputs=bulk_status)
+    bulk_transparent_btn.click(run_bulk_transparent_action, inputs=bulk_alpha_threshold_slider, outputs=bulk_status)
     bulk_process_btn.click(
         run_bulk_process,
         inputs=[upscaler_model, bulk_target_short_side_slider, bulk_upscale_threshold_slider, bulk_passthrough_max_slider],
         outputs=bulk_status
     )
 
-    # Unload models
-    unload_btn.click(on_unload_all_models, outputs=original_status)
+    # Unload models (on Upscale tab)
+    unload_btn.click(on_unload_all_models, outputs=upscale_status)
 
     def go_to_step3():
         """Navigate to Step 3 and refresh output gallery."""

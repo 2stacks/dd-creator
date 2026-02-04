@@ -1,3 +1,7 @@
+from PIL import Image
+# Raise decompression bomb limit for large training images (~17,000 x 17,000 px)
+Image.MAX_IMAGE_PIXELS = 300_000_000
+
 import gradio as gr
 import os
 from src.ui.wizard import render_wizard

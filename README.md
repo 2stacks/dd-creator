@@ -64,7 +64,7 @@ Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directo
 The wizard guides you through 4 steps:
 
 1. **Import** - Select source directory and output location
-2. **Image Tools** - Upscale, generate masks, create transparent versions
+2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Auto-caption with AI models or edit manually
 4. **Export** - Review and finalize your dataset
 

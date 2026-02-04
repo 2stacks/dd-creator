@@ -47,6 +47,22 @@ src/
 - Model cache: `.hf_cache/` directory (HuggingFace models)
 - Upscaler models: `.models/` directory for user-provided `.pth`/`.safetensors` files
 
+## Step 2: Image Tools UI Structure
+
+The Image Tools step has two main areas:
+
+**Workbench (per-image editing):**
+- Original tab: View/resize/save individual images
+- Upscale tab: Real-ESRGAN upscaling with model selector and "Unload All Models" button
+- Mask tab: Generate segmentation masks with invert option
+- Transparent tab: Remove backgrounds with alpha threshold
+
+**Bulk Actions accordion (batch processing):**
+- Left column: Smart Processing (passthrough/upscale/downscale routing by image size)
+- Right column: Mask Generation, Background Removal, Bypass Editing (copy source to output)
+
+Gallery selection resets workbench to Original tab. All save buttons use `variant="primary"` (purple).
+
 ## Gradio 6.0+ Specifics
 
 - Pass `theme` to `launch()`, not `Blocks()`
