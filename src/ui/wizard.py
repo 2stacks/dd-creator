@@ -686,11 +686,13 @@ def render_wizard():
     # State for output images (used in Step 3)
     _output_images = []
     _output_captions = {}
+    _displayed_images = []  # Currently displayed images (may be filtered)
 
     def refresh_output_gallery():
         """Refresh the output images gallery for Step 3."""
-        nonlocal _output_images, _output_captions
+        nonlocal _output_images, _output_captions, _displayed_images
         _output_images, _output_captions = get_output_images()
+        _displayed_images = _output_images.copy()
         if not _output_images:
             return [], "No images found in output directory. Process images in Step 2 first."
         return _output_images, f"Found {len(_output_images)} images in output directory."
@@ -698,11 +700,19 @@ def render_wizard():
     def on_select_output_image(evt: gr.SelectData):
         """Handle gallery selection in Step 3 (output images)."""
         index = evt.index
-        if index < len(_output_images):
-            path = _output_images[index]
+        if index < len(_displayed_images):
+            path = _displayed_images[index]
             caption = _output_captions.get(path, "")
-            return path, caption
-        return None, ""
+            # Load the image for preview
+            try:
+                img = Image.open(path)
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                img = None
+            # Find the index in the full list for Save & Next navigation
+            full_index = _output_images.index(path) if path in _output_images else -1
+            return path, img, caption, full_index
+        return None, None, "", -1
 
     def save_output_caption_action(path, new_caption):
         """Save caption for an output image."""
@@ -717,18 +727,274 @@ def render_wizard():
         except Exception as e:
             return f"Error: {e}"
 
-    def run_output_captioning_action(model_name, progress=gr.Progress()):
+    def save_and_next_action(path, new_caption, current_index):
+        """Save caption and move to next image."""
+        if not path:
+            return "Error: No image selected", None, None, "", -1
+
+        # Save current caption
+        _output_captions[path] = new_caption
+        txt_path = os.path.splitext(path)[0] + ".txt"
+        try:
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(new_caption)
+        except Exception as e:
+            return f"Error saving: {e}", None, None, "", current_index
+
+        # Move to next image
+        next_index = current_index + 1
+        if next_index >= len(_output_images):
+            return f"Saved. Reached end of gallery ({len(_output_images)} images).", None, None, "", -1
+
+        next_path = _output_images[next_index]
+        next_caption = _output_captions.get(next_path, "")
+        try:
+            next_img = Image.open(next_path)
+            next_img = ImageOps.exif_transpose(next_img)
+        except Exception:
+            next_img = None
+
+        return f"Saved. Now editing: {os.path.basename(next_path)}", next_path, next_img, next_caption, next_index
+
+    # State for undo functionality
+    _undo_caption = {"path": None, "caption": None}
+
+    def fix_format_action(caption):
+        """Fix caption formatting: normalize commas, spacing, remove empty tags."""
+        if not caption:
+            return caption, "Nothing to fix."
+
+        # Store for undo
+        original = caption
+
+        # Split by comma, clean each tag, rejoin
+        tags = [t.strip() for t in caption.split(",")]
+        # Remove empty tags and duplicates while preserving order
+        seen = set()
+        cleaned = []
+        for tag in tags:
+            if tag and tag not in seen:
+                cleaned.append(tag)
+                seen.add(tag)
+
+        result = ", ".join(cleaned)
+
+        if result == original:
+            return result, "Already formatted correctly."
+        return result, f"Fixed formatting ({len(tags)} → {len(cleaned)} tags)."
+
+    def dedup_tags_action(caption):
+        """Remove duplicate tags while preserving order."""
+        if not caption:
+            return caption, "Nothing to deduplicate."
+
+        original = caption
+        tags = [t.strip() for t in caption.split(",")]
+        seen = set()
+        unique = []
+        duplicates = 0
+        for tag in tags:
+            tag_lower = tag.lower()
+            if tag and tag_lower not in seen:
+                unique.append(tag)
+                seen.add(tag_lower)
+            elif tag:
+                duplicates += 1
+
+        result = ", ".join(unique)
+
+        if duplicates == 0:
+            return result, "No duplicates found."
+        return result, f"Removed {duplicates} duplicate(s)."
+
+    def store_undo_state(path, caption):
+        """Store current state for undo."""
+        _undo_caption["path"] = path
+        _undo_caption["caption"] = caption
+
+    def undo_changes_action(current_path, current_caption):
+        """Restore the previous caption state."""
+        if _undo_caption["path"] == current_path and _undo_caption["caption"] is not None:
+            restored = _undo_caption["caption"]
+            _undo_caption["caption"] = None  # Clear after use
+            return restored, "Restored previous caption."
+        return current_caption, "Nothing to undo."
+
+    def filter_gallery_action(search_text):
+        """Filter gallery images by caption content."""
+        nonlocal _displayed_images
+        if not search_text or not search_text.strip():
+            # Return all images
+            _displayed_images = _output_images.copy()
+            return _output_images
+
+        search_lower = search_text.lower().strip()
+        filtered = []
+        for path in _output_images:
+            caption = _output_captions.get(path, "").lower()
+            if search_lower in caption:
+                filtered.append(path)
+        _displayed_images = filtered
+        return filtered
+
+    def bulk_add_tag_to_all(tag_text, position):
+        """Add tags to all captions (append or prepend)."""
+        if not tag_text or not tag_text.strip():
+            return "Error: Tag text empty."
+        tags = tag_text.strip().strip(",").strip()
+        prepend = "Prepend" in position
+        count = 0
+        for path in _output_images:
+            cap = _output_captions.get(path, "")
+            if cap:
+                if prepend:
+                    new_cap = f"{tags}, {cap}"
+                else:
+                    new_cap = f"{cap}, {tags}"
+            else:
+                new_cap = tags
+            _output_captions[path] = new_cap
+            try:
+                txt_path = os.path.splitext(path)[0] + ".txt"
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write(new_cap)
+                count += 1
+            except:
+                pass
+        action = "Prepended" if prepend else "Appended"
+        return f"{action} '{tags}' to {count} captions."
+
+    def bulk_remove_tag_from_all(tag_text):
+        """Remove multiple tags from all captions."""
+        if not tag_text or not tag_text.strip():
+            return "Error: Tag text empty."
+        # Split by comma to get list of tags to remove
+        tags_to_remove = [t.strip() for t in tag_text.split(",") if t.strip()]
+        if not tags_to_remove:
+            return "Error: No valid tags to remove."
+
+        count = 0
+        for path in _output_images:
+            cap = _output_captions.get(path, "")
+            original_cap = cap
+            for tag in tags_to_remove:
+                if tag in cap:
+                    # Try to remove with comma variations
+                    cap = cap.replace(f", {tag}", "")
+                    cap = cap.replace(f"{tag}, ", "")
+                    cap = cap.replace(tag, "")
+            # Clean up any double commas or trailing/leading commas
+            while ",," in cap:
+                cap = cap.replace(",,", ",")
+            cap = cap.strip().strip(",").strip()
+
+            if cap != original_cap:
+                _output_captions[path] = cap
+                try:
+                    txt_path = os.path.splitext(path)[0] + ".txt"
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(cap)
+                    count += 1
+                except:
+                    pass
+        tags_str = ", ".join(tags_to_remove[:3])
+        if len(tags_to_remove) > 3:
+            tags_str += f"... (+{len(tags_to_remove) - 3} more)"
+        return f"Removed [{tags_str}] from {count} captions."
+
+    def bulk_search_replace_action(replacement_string, match_mode):
+        """Apply multiple search & replace operations.
+
+        Format: 'old_tag, new_tag; another_old, another_new'
+        """
+        if not replacement_string or not replacement_string.strip():
+            return "Error: Replacement string empty."
+
+        exact_match = match_mode == "Exact Match"
+
+        # Parse semicolon-separated pairs
+        pairs = []
+        for pair in replacement_string.split(";"):
+            pair = pair.strip()
+            if not pair:
+                continue
+            parts = pair.split(",", 1)  # Split on first comma only
+            if len(parts) != 2:
+                continue
+            old_tag = parts[0].strip()
+            new_tag = parts[1].strip()
+            if old_tag:
+                pairs.append((old_tag, new_tag))
+
+        if not pairs:
+            return "Error: No valid replacement pairs found. Use format: old, new; old2, new2"
+
+        count = 0
+        for path in _output_images:
+            cap = _output_captions.get(path, "")
+            original_cap = cap
+
+            for old_tag, new_tag in pairs:
+                if exact_match:
+                    # Exact match: only replace whole tags
+                    # Split by comma, replace matching tags, rejoin
+                    cap_tags = [t.strip() for t in cap.split(",")]
+                    cap_tags = [new_tag if t == old_tag else t for t in cap_tags]
+                    cap = ", ".join(t for t in cap_tags if t)
+                else:
+                    # Substring match
+                    cap = cap.replace(old_tag, new_tag)
+
+            # Clean up
+            while ",," in cap:
+                cap = cap.replace(",,", ",")
+            cap = cap.strip().strip(",").strip()
+
+            if cap != original_cap:
+                _output_captions[path] = cap
+                try:
+                    txt_path = os.path.splitext(path)[0] + ".txt"
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(cap)
+                    count += 1
+                except:
+                    pass
+
+        pairs_str = "; ".join([f"{o} → {n}" for o, n in pairs[:2]])
+        if len(pairs) > 2:
+            pairs_str += f"... (+{len(pairs) - 2} more)"
+        return f"Applied [{pairs_str}] to {count} captions."
+
+    def run_output_captioning_action(model_name, threshold, prefix_tags, suffix_tags, progress=gr.Progress()):
         """Generate captions for all output images."""
         if not _output_images:
             return "No images in output directory."
         captioner = None
         total = len(_output_images)
         success_count = 0
+        prefix = prefix_tags.strip().rstrip(",").strip() if prefix_tags else ""
+        suffix = suffix_tags.strip().lstrip(",").strip() if suffix_tags else ""
+
         try:
             captioner = get_captioner(model_name)
             for img_path in progress.tqdm(_output_images):
                 try:
-                    cap = captioner.generate_caption(img_path)
+                    # Pass threshold for WD14 models
+                    if "WD" in model_name:
+                        cap = captioner.generate_caption(img_path, threshold=threshold)
+                    else:
+                        cap = captioner.generate_caption(img_path)
+
+                    # Build final caption with prefix and suffix
+                    parts = []
+                    if prefix:
+                        parts.append(prefix)
+                    if cap:
+                        parts.append(cap)
+                    if suffix:
+                        parts.append(suffix)
+                    cap = ", ".join(parts)
+
                     _output_captions[img_path] = cap
                     txt_path = os.path.splitext(img_path)[0] + ".txt"
                     with open(txt_path, "w", encoding="utf-8") as f:
@@ -742,41 +1008,6 @@ def render_wizard():
             if captioner:
                 captioner.unload_model()
         return f"Completed. {success_count}/{total} images captioned."
-
-    def bulk_output_replace_action(find_text, replace_text):
-        """Replace text in all output captions."""
-        if not find_text:
-            return "Error: Find text empty."
-        count = 0
-        for path, cap in _output_captions.items():
-            if find_text in cap:
-                new_cap = cap.replace(find_text, replace_text)
-                _output_captions[path] = new_cap
-                try:
-                    txt_path = os.path.splitext(path)[0] + ".txt"
-                    with open(txt_path, "w", encoding="utf-8") as f:
-                        f.write(new_cap)
-                    count += 1
-                except:
-                    pass
-        return f"Updated {count} captions."
-
-    def bulk_output_add_action(text, mode):
-        """Add text to all output captions."""
-        if not text:
-            return "Error: Text empty."
-        count = 0
-        for path, cap in _output_captions.items():
-            new_cap = f"{text}{cap}" if mode == "prepend" else f"{cap}{text}"
-            _output_captions[path] = new_cap
-            try:
-                txt_path = os.path.splitext(path)[0] + ".txt"
-                with open(txt_path, "w", encoding="utf-8") as f:
-                    f.write(new_cap)
-                count += 1
-            except:
-                pass
-        return f"{mode.capitalize()}ed text to {count} captions."
 
     # --- UI LAYOUT ---
     
@@ -1020,55 +1251,142 @@ def render_wizard():
             # STEP 3: Captioning (moved after image tools)
             with gr.TabItem("Step 3: Captioning", id=2) as tab_step_3:
                 gr.Markdown("## Step 3: Captioning & Review")
-                gr.Markdown("*Showing images from the output directory. Process images in Step 2 first.*")
 
-                with gr.Accordion("🤖 Auto-Captioning Tools", open=False):
+                # Hidden states
+                current_path_state = gr.State()
+                current_index_state = gr.State(-1)
+                undo_caption_state = gr.State(None)
+
+                # PHASE 1: Batch Generation (Accordion, Open by Default)
+                with gr.Accordion("Batch Generation", open=True):
                     with gr.Row():
                         model_dropdown = gr.Dropdown(
-                            ["Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption Quantized (8-bit)", "SmilingWolf WD ViT (v3)", "SmilingWolf WD ConvNext (v3)"],
-                            label="Select Model",
+                            ["SmilingWolf WD ConvNext (v3)", "SmilingWolf WD ViT (v3)", "Florence-2-Base", "Florence-2-Large", "BLIP-Base", "BLIP-Large", "JoyCaption (Beta One)", "JoyCaption Quantized (8-bit)"],
+                            label="Model",
                             value="SmilingWolf WD ConvNext (v3)",
-                            scale=2
+                            scale=7
                         )
-                        caption_btn = gr.Button("Generate Captions for All Images", scale=1, variant="primary")
+                        threshold_slider = gr.Slider(
+                            label="Threshold (WD14 only)",
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=0.35,
+                            step=0.05,
+                            scale=3
+                        )
+                    with gr.Row():
+                        prefix_tags_box = gr.Textbox(
+                            label="Prefix (Prepend)",
+                            placeholder="e.g., sks, 1girl",
+                            max_lines=1,
+                            scale=1
+                        )
+                        suffix_tags_box = gr.Textbox(
+                            label="Suffix (Append)",
+                            placeholder="e.g., best quality, 4k",
+                            max_lines=1,
+                            scale=1
+                        )
+                    caption_btn = gr.Button("Generate Tags for All Images", variant="primary")
+                    progress_bar = gr.Textbox(value="Idle", interactive=False, show_label=False, max_lines=1)
 
-                    with gr.Accordion("📊 VRAM Requirements", open=False):
-                        gr.Markdown("""
-                        - **Florence-2 (Base/Large):** ~1.2GB - 2.0GB
-                        - **BLIP (Base/Large):** ~1.0GB - 2.0GB
-                        - **WD14 (ViT / ConvNext):** < 1GB
-                        - **JoyCaption (BF16):** ~17GB (requires 20GB+ GPU)
-                        - **JoyCaption Quantized (8-bit):** ~12-16GB (requires minimum 16GB GPU)
-
-                        *Note: Requirements are estimates and include model loading overhead.*
-                        """)
-
-                    progress_bar = gr.Textbox(label="Progress", value="Idle")
-
-                output_gallery_status = gr.Textbox(label="Output Directory Status", interactive=False)
-
+                # Main area: Library (left) and Editor (right)
                 with gr.Row():
-                    # Gallery takes up more space now
-                    gallery = gr.Gallery(label="Output Images", columns=6, height=600, allow_preview=False, scale=3)
+                    # LEFT COLUMN: Library (50%)
+                    with gr.Column(scale=1):
+                        search_filter_box = gr.Textbox(
+                            placeholder="Filter images by caption content...",
+                            show_label=False,
+                            max_lines=1
+                        )
+                        gallery = gr.Gallery(
+                            columns=4,
+                            height=700,
+                            allow_preview=False,
+                            show_label=False
+                        )
 
-                    # Editor Side Panel
-                    with gr.Column(scale=2):
-                        gr.Markdown("### Edit Caption")
-                        editor_caption = gr.Textbox(label="Caption", lines=10)
-                        save_entry_btn = gr.Button("Save Caption", variant="primary")
-                        save_status = gr.Textbox(label="Status", interactive=False)
-                        current_path_state = gr.State()
+                    # RIGHT COLUMN: Editor (50%)
+                    with gr.Column(scale=1):
+                        editor_preview = gr.Image(
+                            type="pil",
+                            height=350,
+                            interactive=False,
+                            show_label=False
+                        )
+                        editor_caption = gr.Textbox(
+                            label="Caption / Tags",
+                            lines=6,
+                            placeholder="Select an image to edit its caption...",
+                            autofocus=True
+                        )
 
-                        with gr.Accordion("🛠️ Bulk Tools", open=False):
-                            find_box = gr.Textbox(label="Find", placeholder="Text to find")
-                            replace_box = gr.Textbox(label="Replace", placeholder="Replacement text")
-                            replace_btn = gr.Button("Replace All")
+                        # Hygiene Tools
+                        with gr.Row():
+                            fix_format_btn = gr.Button("Fix Format")
+                            dedup_btn = gr.Button("Dedup Tags")
+                            undo_btn = gr.Button("Undo Changes")
 
-                            tag_box = gr.Textbox(label="Tag / Text", placeholder="Text to add")
-                            with gr.Row():
-                                prepend_btn = gr.Button("Prepend to All")
-                                append_btn = gr.Button("Append to All")
-                            caption_bulk_status = gr.Textbox(label="Bulk Status", interactive=False)
+                        with gr.Accordion("What do these buttons do?", open=False):
+                            gr.Markdown("""- **Fix Format**: Normalize comma spacing and remove empty tags
+- **Dedup Tags**: Remove duplicate tags (case-insensitive)
+- **Undo Changes**: Revert to caption before last edit""")
+
+                        save_status = gr.Textbox(interactive=False, show_label=False, max_lines=1)
+
+                        # Navigation
+                        save_next_btn = gr.Button("Save & Next", variant="primary", size="lg")
+
+                # Bulk Tagging Tools (Accordion, Closed)
+                with gr.Accordion("Bulk Tagging Tools", open=False):
+                    with gr.Row():
+                        # Column 1: Add Tags
+                        with gr.Column():
+                            gr.Markdown("**Add Tags**")
+                            bulk_add_position = gr.Radio(
+                                choices=["Prepend", "Append"],
+                                value="Prepend",
+                                show_label=False
+                            )
+                            bulk_add_tags_box = gr.Textbox(
+                                placeholder="e.g., masterpiece, best quality",
+                                show_label=False,
+                                max_lines=1
+                            )
+                            bulk_add_btn = gr.Button("Add to All", variant="primary")
+
+                        # Column 2: Remove Tags
+                        with gr.Column():
+                            gr.Markdown("**Remove Tags**")
+                            bulk_remove_placeholder = gr.Radio(
+                                choices=["Comma-separated"],
+                                value="Comma-separated",
+                                show_label=False,
+                                interactive=False
+                            )
+                            bulk_remove_tags_box = gr.Textbox(
+                                placeholder="e.g., lowres, bad anatomy",
+                                show_label=False,
+                                max_lines=1
+                            )
+                            bulk_remove_btn = gr.Button("Remove from All", variant="primary")
+
+                        # Column 3: Search & Replace
+                        with gr.Column():
+                            gr.Markdown("**Search & Replace**")
+                            bulk_exact_match = gr.Radio(
+                                choices=["Exact Match", "Partial Match"],
+                                value="Exact Match",
+                                show_label=False
+                            )
+                            bulk_replace_box = gr.Textbox(
+                                placeholder="old, new; red, blue",
+                                show_label=False,
+                                max_lines=1
+                            )
+                            bulk_replace_btn = gr.Button("Replace All", variant="primary")
+
+                    caption_bulk_status = gr.Textbox(interactive=False, show_label=False, max_lines=1)
 
                 with gr.Row():
                     back_btn_3 = gr.Button("< Back")
@@ -1193,24 +1511,79 @@ def render_wizard():
         return gr.Tabs(selected=2), images, status
 
     back_btn_2.click(lambda: gr.Tabs(selected=0), outputs=tabs)
-    next_btn_2.click(go_to_step3, outputs=[tabs, gallery, output_gallery_status])
+    next_btn_2.click(go_to_step3, outputs=[tabs, gallery, save_status])
 
     # Step 3: Captioning (uses output directory images)
-    caption_btn.click(run_output_captioning_action, inputs=model_dropdown, outputs=progress_bar)
+    caption_btn.click(
+        run_output_captioning_action,
+        inputs=[model_dropdown, threshold_slider, prefix_tags_box, suffix_tags_box],
+        outputs=progress_bar
+    )
 
     # When tab is selected, refresh gallery with output images
-    tab_step_3.select(refresh_output_gallery, outputs=[gallery, output_gallery_status])
+    tab_step_3.select(refresh_output_gallery, outputs=[gallery, save_status])
 
-    # When gallery image is selected, update editor
-    gallery.select(on_select_output_image, outputs=[current_path_state, editor_caption])
+    # Search/filter functionality
+    search_filter_box.change(filter_gallery_action, inputs=search_filter_box, outputs=gallery)
 
-    # Save button
-    save_entry_btn.click(save_output_caption_action, inputs=[current_path_state, editor_caption], outputs=save_status)
+    # When gallery image is selected, update editor with preview
+    gallery.select(
+        on_select_output_image,
+        outputs=[current_path_state, editor_preview, editor_caption, current_index_state]
+    )
+
+    # Hygiene tools
+    def fix_format_with_undo(caption, current_path):
+        """Fix format and store undo state."""
+        store_undo_state(current_path, caption)
+        new_caption, status = fix_format_action(caption)
+        return new_caption, status
+
+    def dedup_with_undo(caption, current_path):
+        """Deduplicate tags and store undo state."""
+        store_undo_state(current_path, caption)
+        new_caption, status = dedup_tags_action(caption)
+        return new_caption, status
+
+    fix_format_btn.click(
+        fix_format_with_undo,
+        inputs=[editor_caption, current_path_state],
+        outputs=[editor_caption, save_status]
+    )
+    dedup_btn.click(
+        dedup_with_undo,
+        inputs=[editor_caption, current_path_state],
+        outputs=[editor_caption, save_status]
+    )
+    undo_btn.click(
+        undo_changes_action,
+        inputs=[current_path_state, editor_caption],
+        outputs=[editor_caption, save_status]
+    )
+
+    # Save & Next button
+    save_next_btn.click(
+        save_and_next_action,
+        inputs=[current_path_state, editor_caption, current_index_state],
+        outputs=[save_status, current_path_state, editor_preview, editor_caption, current_index_state]
+    )
 
     # Bulk tools
-    replace_btn.click(bulk_output_replace_action, inputs=[find_box, replace_box], outputs=caption_bulk_status)
-    prepend_btn.click(lambda t: bulk_output_add_action(t, "prepend"), inputs=tag_box, outputs=caption_bulk_status)
-    append_btn.click(lambda t: bulk_output_add_action(t, "append"), inputs=tag_box, outputs=caption_bulk_status)
+    bulk_add_btn.click(
+        bulk_add_tag_to_all,
+        inputs=[bulk_add_tags_box, bulk_add_position],
+        outputs=caption_bulk_status
+    )
+    bulk_remove_btn.click(
+        bulk_remove_tag_from_all,
+        inputs=bulk_remove_tags_box,
+        outputs=caption_bulk_status
+    )
+    bulk_replace_btn.click(
+        bulk_search_replace_action,
+        inputs=[bulk_replace_box, bulk_exact_match],
+        outputs=caption_bulk_status
+    )
 
     # Nav buttons (Step 3)
     back_btn_3.click(lambda: gr.Tabs(selected=1), outputs=tabs)

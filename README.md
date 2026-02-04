@@ -65,7 +65,11 @@ The wizard guides you through 4 steps:
 
 1. **Import** - Select source directory and output location
 2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
-3. **Captioning** - Auto-caption with AI models or edit manually
+3. **Captioning** - Generate and edit captions with powerful tools:
+   - Batch generation with prefix/suffix tags (trigger words, quality tags)
+   - Search/filter images by caption content
+   - Hygiene tools: fix formatting, deduplicate tags, undo changes
+   - Bulk operations: add/remove tags, search & replace across all captions
 4. **Export** - Review and finalize your dataset
 
 ## Project Structure

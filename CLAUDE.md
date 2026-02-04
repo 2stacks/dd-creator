@@ -63,6 +63,31 @@ The Image Tools step has two main areas:
 
 Gallery selection resets workbench to Original tab. All save buttons use `variant="primary"` (purple).
 
+## Step 3: Captioning UI Structure
+
+The Captioning step has three main areas:
+
+**Batch Generation accordion (open by default):**
+- Model dropdown + Threshold slider (WD14 only)
+- Prefix/Suffix textboxes for static tags applied to all captions
+- "Generate Tags for All Images" button
+
+**Main area (two-column layout, 50/50 split):**
+- Left column: Search/filter textbox + Gallery (4x4 grid, height=700)
+- Right column: Image preview + Caption editor (6 lines) + Hygiene tools + Save & Next button
+
+**Hygiene tools:**
+- Fix Format: Normalize comma spacing, remove empty tags
+- Dedup Tags: Remove duplicate tags (case-insensitive)
+- Undo Changes: Revert to caption before last hygiene action
+
+**Bulk Tagging Tools accordion (closed by default):**
+- Add Tags: Prepend/Append radio + tags input + Add to All button
+- Remove Tags: Comma-separated tags input + Remove from All button
+- Search & Replace: Exact/Partial match radio + semicolon-separated pairs + Replace All button
+
+Gallery filtering tracks displayed images separately (`_displayed_images`) so selection works correctly with filtered results.
+
 ## Gradio 6.0+ Specifics
 
 - Pass `theme` to `launch()`, not `Blocks()`
