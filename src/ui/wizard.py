@@ -233,7 +233,8 @@ def render_wizard():
                 img = Image.open(path).convert("RGB")
                 img = ImageOps.exif_transpose(img)
                 width, height = img.size
-                status_text = f"Selected: {os.path.basename(path)} ({width}x{height}px)"
+                file_size = os.path.getsize(path) / 1024
+                status_text = f"Selected: {os.path.basename(path)} ({width}x{height}px, {file_size:.0f} KB)"
             except Exception as e:
                 img = None
                 status_text = f"Error loading image: {e}"
@@ -273,7 +274,7 @@ def render_wizard():
                 "Create mask to generate." if not existing_mask else "Mask loaded.",  # mask_status
                 existing_transparent,    # workbench_transparent
                 "Create transparent to generate." if not existing_transparent else "Transparent loaded.",  # transparent_status
-                None,                    # upscaled_image_state (reset)
+                existing_upscaled,       # upscaled_image_state (preserve existing upscaled for mask/transparent)
                 None,                    # resized_image_state (reset)
                 None,                    # mask_image_state (reset)
                 None,                    # transparent_image_state (reset)
@@ -302,7 +303,8 @@ def render_wizard():
             # Then downscale to target shortest side
             result = resize_to_shortest_side(upscaled, int(target_resolution))
             width, height = result.size
-            return result, result, f"Upscaled {upscaler.scale}x → resized to {width}x{height}px. Click 'Save' to save as JPG."
+            orig_size = os.path.getsize(image_path) / 1024
+            return result, result, f"Upscaled {upscaler.scale}x → {width}x{height}px (original: {orig_size:.0f} KB). Click 'Save' to save as JPG."
         except Exception as e:
             return None, None, f"Upscale Error: {e}"
 
@@ -314,7 +316,7 @@ def render_wizard():
         try:
             seg = get_segmenter()
 
-            # Priority: upscaled > resized > original
+            # Priority: in-memory upscaled > in-memory resized > saved upscaled on disk > original
             processed_img = upscaled_img if upscaled_img is not None else resized_img
 
             if processed_img is not None:
@@ -330,6 +332,9 @@ def render_wizard():
                 mask = seg.segment(temp_path)
                 os.unlink(temp_path)
                 source_info = "upscaled image" if upscaled_img is not None else "resized image"
+            elif image_path in global_state.upscaled:
+                mask = seg.segment(global_state.upscaled[image_path])
+                source_info = "saved upscaled image"
             else:
                 mask = seg.segment(image_path)
                 source_info = "original image"
@@ -338,7 +343,8 @@ def render_wizard():
                 # Invert the mask (white becomes black, black becomes white)
                 mask = ImageOps.invert(mask.convert("L")).convert("RGB")
 
-            return mask, mask, f"Mask generated from {source_info}. Click 'Save Mask' to save."
+            mask_w, mask_h = mask.size if mask else (0, 0)
+            return mask, mask, f"Mask generated from {source_info} ({mask_w}x{mask_h}px). Click 'Save Mask' to save."
         except Exception as e:
             return None, None, f"Mask Error: {e}"
 
@@ -350,7 +356,7 @@ def render_wizard():
         try:
             seg = get_segmenter()
 
-            # Priority: upscaled > resized > original
+            # Priority: in-memory upscaled > in-memory resized > saved upscaled on disk > original
             processed_img = upscaled_img if upscaled_img is not None else resized_img
 
             if processed_img is not None:
@@ -366,11 +372,15 @@ def render_wizard():
                 transparent = seg.segment(temp_path, return_transparent=True)
                 os.unlink(temp_path)
                 source_info = "upscaled image" if upscaled_img is not None else "resized image"
+            elif image_path in global_state.upscaled:
+                transparent = seg.segment(global_state.upscaled[image_path], return_transparent=True)
+                source_info = "saved upscaled image"
             else:
                 transparent = seg.segment(image_path, return_transparent=True)
                 source_info = "original image"
 
-            return transparent, transparent, f"Transparent generated from {source_info}. Click 'Save Transparent' to save."
+            t_w, t_h = transparent.size if transparent else (0, 0)
+            return transparent, transparent, f"Transparent generated from {source_info} ({t_w}x{t_h}px). Click 'Save Transparent' to save."
         except Exception as e:
             return None, None, f"Transparent Error: {e}"
 
@@ -387,13 +397,18 @@ def render_wizard():
 
             if isinstance(original_img, Image.Image):
                 original_img.save(output_path)
+                w, h = original_img.size
             elif isinstance(original_img, np.ndarray):
-                Image.fromarray(original_img).save(output_path)
+                pil_img = Image.fromarray(original_img)
+                pil_img.save(output_path)
+                w, h = pil_img.size
             else:
                 import shutil
                 shutil.copy2(image_path, output_path)
+                w, h = Image.open(output_path).size
 
-            return f"Saved original to {os.path.basename(output_path)}"
+            file_size = os.path.getsize(output_path) / 1024
+            return f"Saved {os.path.basename(output_path)} ({w}x{h}, {file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
 
@@ -463,8 +478,9 @@ def render_wizard():
             upscaled_img.save(output_path, "JPEG", quality=98, optimize=True)
 
             global_state.upscaled[image_path] = output_path
-            file_size = os.path.getsize(output_path) / 1024  # KB
-            return f"Saved {os.path.basename(output_path)} ({file_size:.0f} KB)"
+            w, h = upscaled_img.size
+            file_size = os.path.getsize(output_path) / 1024
+            return f"Saved {os.path.basename(output_path)} ({w}x{h}, {file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
 
@@ -493,13 +509,14 @@ def render_wizard():
             mask_img.save(save_path, "PNG", optimize=True)
 
             global_state.masks[image_path] = save_path
+            w, h = mask_img.size
             file_size = os.path.getsize(save_path) / 1024
-            return f"Saved {base_name}_mask.png ({file_size:.0f} KB)"
+            return f"Saved {base_name}_mask.png ({w}x{h}, {file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
 
     def save_transparent_action(image_path, transparent_img):
-        """Save the transparent image as WebP lossless to the output directory."""
+        """Save the transparent image as PNG to the output directory."""
         if not image_path:
             return "No image selected."
         if transparent_img is None:
@@ -509,7 +526,7 @@ def render_wizard():
             base_name = os.path.basename(image_path).rsplit('.', 1)[0]
             dummy_path = global_state.get_output_path(image_path, ".txt")
             base_dir = os.path.dirname(dummy_path)
-            save_path = os.path.join(base_dir, base_name + "_transparent.webp")
+            save_path = os.path.join(base_dir, base_name + "_transparent.png")
 
             if isinstance(transparent_img, np.ndarray):
                 transparent_img = Image.fromarray(transparent_img)
@@ -518,12 +535,13 @@ def render_wizard():
             if transparent_img.mode != "RGBA":
                 transparent_img = transparent_img.convert("RGBA")
 
-            # Save as WebP lossless for best quality + compression
-            transparent_img.save(save_path, "WEBP", lossless=True)
+            # Save as PNG for universal transparency support
+            transparent_img.save(save_path, "PNG", optimize=True)
 
             global_state.transparent[image_path] = save_path
+            w, h = transparent_img.size
             file_size = os.path.getsize(save_path) / 1024
-            return f"Saved {base_name}_transparent.webp ({file_size:.0f} KB)"
+            return f"Saved {base_name}_transparent.png ({w}x{h}, {file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
 
@@ -546,7 +564,7 @@ def render_wizard():
         return "All models unloaded from VRAM."
 
     def run_bulk_masks_action(invert_mask, progress=gr.Progress()):
-        """Generate grayscale PNG masks for all images."""
+        """Generate grayscale PNG masks for all images, using upscaled versions when available."""
         if not global_state.image_paths:
             return "No images loaded."
 
@@ -556,7 +574,10 @@ def render_wizard():
 
         for img_path in progress.tqdm(global_state.image_paths, desc="Generating masks"):
             try:
-                mask = seg.segment(img_path)
+                # Use upscaled version if available, otherwise original
+                source_path = global_state.upscaled.get(img_path, img_path)
+
+                mask = seg.segment(source_path)
                 if mask:
                     # Convert to grayscale for smaller file size
                     if mask.mode != "L":
@@ -582,17 +603,23 @@ def render_wizard():
         return f"Generated {success}/{total} masks (grayscale PNG)."
 
     def run_bulk_transparent_action(alpha_threshold, progress=gr.Progress()):
-        """Generate WebP lossless transparent images for all images."""
+        """Generate PNG transparent images for all images, using upscaled versions when available."""
         if not global_state.image_paths:
             return "No images loaded."
 
         seg = get_segmenter()
         total = len(global_state.image_paths)
         success = 0
+        used_upscaled = 0
 
         for img_path in progress.tqdm(global_state.image_paths, desc="Generating transparent"):
             try:
-                img = seg.segment(img_path, return_transparent=True)
+                # Use upscaled version if available, otherwise original
+                source_path = global_state.upscaled.get(img_path, img_path)
+                if source_path != img_path:
+                    used_upscaled += 1
+
+                img = seg.segment(source_path, return_transparent=True)
                 if img:
                     # Ensure RGBA mode for transparency
                     if img.mode != "RGBA":
@@ -605,18 +632,21 @@ def render_wizard():
                         a = a.point(lambda x: 255 if x > alpha_threshold else 0)
                         img = Image.merge("RGBA", (r, g, b, a))
 
-                    # Save as WebP lossless to flat output folder
+                    # Save as PNG for universal transparency support
                     dummy_path = global_state.get_output_path(img_path, ".txt")
                     base_dir = os.path.dirname(dummy_path)
                     base_name = os.path.basename(img_path).rsplit('.', 1)[0]
-                    save_path = os.path.join(base_dir, base_name + "_transparent.webp")
-                    img.save(save_path, "WEBP", lossless=True)
+                    save_path = os.path.join(base_dir, base_name + "_transparent.png")
+                    img.save(save_path, "PNG", optimize=True)
                     global_state.transparent[img_path] = save_path
                     success += 1
             except Exception as e:
                 print(f"Transparent error for {img_path}: {e}")
 
-        return f"Generated {success}/{total} transparent images."
+        result = f"Generated {success}/{total} transparent images (PNG)."
+        if used_upscaled:
+            result += f" ({used_upscaled} from upscaled sources)"
+        return result
 
     def run_bulk_process(model_name, target_short_side, upscale_threshold, passthrough_max, progress=gr.Progress()):
         """Process all images with conditional routing.
@@ -708,46 +738,27 @@ def render_wizard():
         return gr.update(choices=models, value=models[0])
 
     def get_output_images():
-        """Scan output directory for images (excluding masks/ subdirectory, and transparent only if base exists)."""
+        """Scan output directory for images (excluding masks/ subdirectory)."""
         if not global_state.output_directory or not os.path.isdir(global_state.output_directory):
             return [], {}
 
         valid_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
-        all_files = set()
         images = []
         captions = {}
 
-        # First pass: collect all image filenames (skip masks/ subdirectory)
         for root, dirs, files in os.walk(global_state.output_directory):
             # Skip masks subdirectory
             if 'masks' in dirs:
                 dirs.remove('masks')
             for file in files:
                 if file.lower().endswith(valid_extensions):
-                    all_files.add(os.path.join(root, file))
+                    file_lower = file.lower()
+                    # Always skip mask files
+                    if '_mask.' in file_lower:
+                        continue
+                    images.append(os.path.join(root, file))
 
-        # Second pass: filter images
-        for img_path in all_files:
-            file = os.path.basename(img_path)
-            file_lower = file.lower()
-
-            # Always skip mask files
-            if '_mask.' in file_lower:
-                continue
-
-            # For transparent files, only include if no base image exists
-            if '_transparent.' in file_lower:
-                # Check if base image exists (try common extensions)
-                base_stem = file.rsplit('_transparent.', 1)[0]
-                dir_path = os.path.dirname(img_path)
-                base_exists = any(
-                    os.path.join(dir_path, base_stem + ext) in all_files
-                    for ext in ['.jpg', '.jpeg', '.png', '.webp']
-                )
-                if base_exists:
-                    continue  # Skip - base image exists
-
-            images.append(img_path)
+        for img_path in images:
 
             # Try to load existing caption
             txt_path = os.path.splitext(img_path)[0] + ".txt"
@@ -783,6 +794,8 @@ def render_wizard():
         if index < len(_displayed_images):
             path = _displayed_images[index]
             caption = _output_captions.get(path, "")
+            # Store caption on selection so Undo can revert to saved version
+            store_undo_state(path, caption)
             # Load the image for preview
             try:
                 img = Image.open(path)
@@ -803,6 +816,8 @@ def render_wizard():
         try:
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(new_caption)
+            # Update undo baseline to the newly saved version
+            store_undo_state(path, new_caption)
             return f"Saved caption for {os.path.basename(path)}"
         except Exception as e:
             return f"Error: {e}"
@@ -828,6 +843,8 @@ def render_wizard():
 
         next_path = _output_images[next_index]
         next_caption = _output_captions.get(next_path, "")
+        # Store undo baseline for the next image
+        store_undo_state(next_path, next_caption)
         try:
             next_img = Image.open(next_path)
             next_img = ImageOps.exif_transpose(next_img)
@@ -835,6 +852,33 @@ def render_wizard():
             next_img = None
 
         return f"Saved. Now editing: {os.path.basename(next_path)}", next_path, next_img, next_caption, next_index
+
+    def delete_image_action(path):
+        """Delete an image and its caption file from the output directory, then refresh gallery."""
+        nonlocal _output_images, _output_captions, _displayed_images
+        if not path:
+            return "No image selected.", _output_images, None, "", -1
+
+        basename = os.path.basename(path)
+        try:
+            # Delete image file
+            if os.path.exists(path):
+                os.remove(path)
+            # Delete associated caption file
+            txt_path = os.path.splitext(path)[0] + ".txt"
+            if os.path.exists(txt_path):
+                os.remove(txt_path)
+
+            # Remove from tracking
+            _output_captions.pop(path, None)
+            if path in _output_images:
+                _output_images.remove(path)
+            if path in _displayed_images:
+                _displayed_images.remove(path)
+
+            return f"Deleted {basename}", _output_images, None, "", -1
+        except Exception as e:
+            return f"Delete error: {e}", _output_images, None, "", -1
 
     # State for undo functionality
     _undo_caption = {"path": None, "caption": None}
@@ -893,11 +937,10 @@ def render_wizard():
         _undo_caption["caption"] = caption
 
     def undo_changes_action(current_path, current_caption):
-        """Restore the previous caption state."""
+        """Restore caption to the last saved version."""
         if _undo_caption["path"] == current_path and _undo_caption["caption"] is not None:
             restored = _undo_caption["caption"]
-            _undo_caption["caption"] = None  # Clear after use
-            return restored, "Restored previous caption."
+            return restored, "Restored to last saved caption."
         return current_caption, "Nothing to undo."
 
     def filter_gallery_action(search_text):
@@ -1122,6 +1165,49 @@ def render_wizard():
             if captioner:
                 captioner.unload_model()
         return f"Completed. {success_count}/{total} images captioned."
+
+    def run_single_captioning_action(img_path, model_name, threshold, prefix_tags, suffix_tags, filter_ratings):
+        """Generate caption for a single selected image."""
+        if not img_path:
+            return "No image selected.", ""
+
+        prefix = prefix_tags.strip().rstrip(",").strip() if prefix_tags else ""
+        suffix = suffix_tags.strip().lstrip(",").strip() if suffix_tags else ""
+        captioner = None
+
+        try:
+            captioner = get_captioner(model_name)
+
+            if "WD" in model_name:
+                cap = captioner.generate_caption(img_path, threshold=threshold)
+            else:
+                cap = captioner.generate_caption(img_path)
+
+            if filter_ratings and cap:
+                tags = [t.strip() for t in cap.split(",") if t.strip()]
+                tags = filter_rating_tags(tags)
+                cap = ", ".join(tags)
+
+            parts = []
+            if prefix:
+                parts.append(prefix)
+            if cap:
+                parts.append(cap)
+            if suffix:
+                parts.append(suffix)
+            cap = ", ".join(parts)
+
+            _output_captions[img_path] = cap
+            txt_path = os.path.splitext(img_path)[0] + ".txt"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(cap)
+
+            return f"Generated caption for {os.path.basename(img_path)}", cap
+        except Exception as e:
+            return f"Captioning error: {e}", ""
+        finally:
+            if captioner:
+                captioner.unload_model()
 
     # --- UI LAYOUT ---
     
@@ -1422,10 +1508,10 @@ def render_wizard():
                 current_index_state = gr.State(-1)
                 undo_caption_state = gr.State(None)
 
-                # PHASE 1: Batch Generation (Accordion, Open by Default)
-                with gr.Accordion("Batch Generation", open=True):
+                # PHASE 1: Caption / Tag Generation (Accordion, Open by Default)
+                with gr.Accordion("Caption / Tag Generation", open=True):
                     with gr.Row():
-                        # Left column: Model selector (50%)
+                        # Left column: Model selector, Prefix, Suffix
                         with gr.Column(scale=1):
                             model_dropdown = gr.Dropdown(
                                 [
@@ -1441,7 +1527,19 @@ def render_wizard():
                                 label="Model",
                                 value="SmilingWolf WD ConvNext (v3)"
                             )
-                            with gr.Accordion("🖥️ VRAM Requirements", open=False):
+                            prefix_tags_box = gr.Textbox(
+                                label="Prefix (Prepend)",
+                                placeholder="e.g., sks, 1girl",
+                                max_lines=1
+                            )
+                            suffix_tags_box = gr.Textbox(
+                                label="Suffix (Append)",
+                                placeholder="e.g., best quality, 4k",
+                                max_lines=1
+                            )
+                        # Right column: VRAM Requirements, Threshold, Filter
+                        with gr.Column(scale=1):
+                            with gr.Accordion("🖥️ Model Information", open=False):
                                 gr.Markdown("""
 - **SmilingWolf WD14 (ViT/ConvNext):** ~2GB VRAM. Fast Danbooru-style tagging using ONNX runtime. Best for anime/illustration.
 - **BLIP-Base:** ~2GB VRAM. Natural language captions, good general purpose.
@@ -1451,8 +1549,6 @@ def render_wizard():
 - **JoyCaption Quantized (8-bit):** ~12-16GB VRAM. High quality captions, requires 16GB+ GPU.
 - **JoyCaption (Beta One):** ~17GB VRAM. Full BF16 precision, requires 20GB+ GPU (RTX 3090/4090).
 """)
-                        # Right column: Threshold and Filter (50%)
-                        with gr.Column(scale=1):
                             threshold_slider = gr.Slider(
                                 label="Threshold (WD14 only)",
                                 minimum=0.0,
@@ -1466,20 +1562,8 @@ def render_wizard():
                                 value=True
                             )
                     with gr.Row():
-                        prefix_tags_box = gr.Textbox(
-                            label="Prefix (Prepend)",
-                            placeholder="e.g., sks, 1girl",
-                            max_lines=1,
-                            scale=1
-                        )
-                        suffix_tags_box = gr.Textbox(
-                            label="Suffix (Append)",
-                            placeholder="e.g., best quality, 4k",
-                            max_lines=1,
-                            scale=1
-                        )
-                    caption_btn = gr.Button("Generate Tags for All Images", variant="primary")
-                    progress_bar = gr.Textbox(value="Idle", interactive=False, show_label=False, max_lines=1)
+                        caption_btn = gr.Button("Generate for All Images", variant="primary")
+                        caption_single_btn = gr.Button("Generate for Selected Image", variant="primary")
 
                 # Main area: Library (left) and Editor (right)
                 with gr.Row():
@@ -1492,8 +1576,8 @@ def render_wizard():
                             show_label=False
                         )
                         search_filter_box = gr.Textbox(
+                            label="Filter",
                             placeholder="Filter images by caption content...",
-                            show_label=False,
                             max_lines=1
                         )
 
@@ -1512,24 +1596,30 @@ def render_wizard():
                             autofocus=True
                         )
 
-                        # Hygiene Tools
-                        with gr.Accordion("What do these buttons do?", open=False):
-                            gr.Markdown("""- **Fix Format**: Normalize comma spacing and remove empty tags
-- **Dedup Tags**: Remove duplicate tags (case-insensitive)
-- **Undo Changes**: Revert to caption before last edit""")
-
+                        # Edit Tools
+                        gr.Markdown("**Edit Tools**")
                         with gr.Row():
                             fix_format_btn = gr.Button("Fix Format")
                             dedup_btn = gr.Button("Dedup Tags")
                             undo_btn = gr.Button("Undo Changes")
-
-                        save_status = gr.Textbox(interactive=False, show_label=False, max_lines=1)
+                        with gr.Accordion("What do these buttons do?", open=False):
+                            gr.Markdown("""- **Fix Format**: Normalize comma spacing and remove empty tags
+- **Dedup Tags**: Remove duplicate tags (case-insensitive)
+- **Undo Changes**: Revert to last saved caption""")
 
                         # Navigation
-                        save_next_btn = gr.Button("Save & Next", variant="primary", size="lg")
+                        with gr.Row():
+                            save_next_btn = gr.Button("Save & Next", variant="primary", size="lg", scale=3)
+                            delete_image_btn = gr.Button("Delete Image", variant="stop", size="lg", scale=1)
 
-                # Bulk Tagging Tools (Accordion, Closed)
-                with gr.Accordion("Bulk Tagging Tools", open=False):
+                        save_status = gr.Textbox(
+                            label="Status",
+                            value="Select an image from the gallery.",
+                            interactive=False
+                        )
+
+                # Bulk Edit Tools (Accordion, Closed)
+                with gr.Accordion("Bulk Edit Tools", open=False):
                     with gr.Row():
                         # Column 1: Add Tags
                         with gr.Column():
@@ -1577,7 +1667,6 @@ def render_wizard():
                             )
                             bulk_replace_btn = gr.Button("Replace All", variant="primary")
 
-                    caption_bulk_status = gr.Textbox(interactive=False, show_label=False, max_lines=1)
 
                 with gr.Row():
                     back_btn_3 = gr.Button("< Back")
@@ -1674,10 +1763,10 @@ def render_wizard():
 
     refresh_models_btn.click(refresh_upscaler_models, outputs=upscaler_model)
 
-    # TAB 3: Mask - Create and Save buttons
+    # TAB 3: Mask - Create and Save buttons (use upscaled_image_state for reliable full-res data)
     create_mask_btn.click(
         generate_mask_action,
-        inputs=[selected_path_state, workbench_upscaled, resized_image_state, invert_mask_check],
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state, invert_mask_check],
         outputs=[workbench_mask, mask_image_state, mask_status]
     )
 
@@ -1687,10 +1776,10 @@ def render_wizard():
         outputs=mask_status
     )
 
-    # TAB 4: Transparent - Create and Save buttons
+    # TAB 4: Transparent - Create and Save buttons (use upscaled_image_state for reliable full-res data)
     create_transparent_btn.click(
         generate_transparent_action,
-        inputs=[selected_path_state, workbench_upscaled, resized_image_state, alpha_threshold_slider],
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state, alpha_threshold_slider],
         outputs=[workbench_transparent, transparent_image_state, transparent_status]
     )
 
@@ -1725,7 +1814,13 @@ def render_wizard():
     caption_btn.click(
         run_output_captioning_action,
         inputs=[model_dropdown, threshold_slider, prefix_tags_box, suffix_tags_box, filter_ratings_check],
-        outputs=progress_bar
+        outputs=save_status
+    )
+
+    caption_single_btn.click(
+        run_single_captioning_action,
+        inputs=[current_path_state, model_dropdown, threshold_slider, prefix_tags_box, suffix_tags_box, filter_ratings_check],
+        outputs=[save_status, editor_caption]
     )
 
     # When tab is selected, refresh gallery with output images
@@ -1776,21 +1871,28 @@ def render_wizard():
         outputs=[save_status, current_path_state, editor_preview, editor_caption, current_index_state]
     )
 
+    # Delete image button
+    delete_image_btn.click(
+        delete_image_action,
+        inputs=current_path_state,
+        outputs=[save_status, gallery, editor_preview, editor_caption, current_index_state]
+    )
+
     # Bulk tools
     bulk_add_btn.click(
         bulk_add_tag_to_all,
         inputs=[bulk_add_tags_box, bulk_add_position],
-        outputs=caption_bulk_status
+        outputs=save_status
     )
     bulk_remove_btn.click(
         bulk_remove_tag_from_all,
         inputs=bulk_remove_tags_box,
-        outputs=caption_bulk_status
+        outputs=save_status
     )
     bulk_replace_btn.click(
         bulk_search_replace_action,
         inputs=[bulk_replace_box, bulk_exact_match],
-        outputs=caption_bulk_status
+        outputs=save_status
     )
 
     # Nav buttons (Step 3)
