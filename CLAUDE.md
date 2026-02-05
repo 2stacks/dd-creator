@@ -56,20 +56,21 @@ Two-column layout with tabbed sections for source data and workspace configurati
 **Column 1: Source Data (Input)**
 - Tabs: "Local Folder" | "Upload"
 - Local Folder tab:
-  - Path to Source Images textbox (default: `datasets/input`)
   - "Browse Directories" accordion with FileExplorer
+  - Image Source Directory textbox (default: `datasets/input`)
 - Upload tab:
   - gr.File component (file_count="multiple") for uploading individual files or entire folders
+  - Info text explaining upload destination (custom folder or `datasets/input/uploads/`)
   - Upload status textbox
 
 **Column 2: Workspace (Output)**
 - Tabs: "New Project" | "Continue Existing"
 - New Project tab:
+  - "About Projects" accordion explaining new vs. continue existing workflows
   - Project Name textbox
-  - Info text showing path that will be created
 - Continue Existing tab:
-  - Output Directory textbox
   - "Browse Existing Projects" accordion with FileExplorer
+  - Output Directory textbox
 
 **Common Elements:**
 - Full-width "Scan & Initialize Project" button (primary, large)
@@ -82,17 +83,19 @@ Two-column layout with tabbed sections for source data and workspace configurati
 
 **Scan Logic (value-based, no tab state tracking):**
 - Source: Uses upload staging only if local folder is still the default. A custom local folder path always takes priority.
-- Output: Project Name (creates `datasets/output/<name>/`) > existing Output Directory > fallback to `datasets/output/`.
+- Output: Project Name (creates `datasets/output/<name>/`) > existing Output Directory. Using the bare `datasets/output/` as output is not allowed — users must define a project name or select an existing project folder.
 
 ## Step 2: Image Tools UI Structure
 
 Two-column layout (40/60 split) with gallery height=700 and image viewer height=500.
 
-**Workbench (per-image editing):**
+**Left column (40%):** Image gallery + unified Status textbox below gallery. All workbench actions across all tabs output status messages to this single status bar.
+
+**Workbench (per-image editing, right column 60%):**
 - Original tab: View/resize/save individual images
 - Upscale tab: Real-ESRGAN upscaling with model selector and "Unload All Models" button
 - Mask tab: Generate segmentation masks with invert option
-- Transparent tab: Remove backgrounds with alpha threshold
+- Transparent tab: Remove backgrounds with alpha threshold (info text on slider)
 
 **Bulk Actions accordion (batch processing):**
 - Left column: Smart Processing (passthrough/upscale/downscale routing by image size)
@@ -111,8 +114,8 @@ Two-column layout (40/60 split) with gallery height=700 and image preview height
 - "Generate Tags for All Images" button
 
 **Main area (two-column layout, 40/60 split):**
-- Left column: Gallery (4x4 grid, height=700) + Search/filter textbox below
-- Right column: Image preview (height=500) + Caption editor (6 lines) + Hygiene tools + Save & Next button
+- Left column: Gallery (4x4 grid, height=700) + Status textbox below gallery
+- Right column: Filter textbox + Image preview (height=500) + Caption editor (6 lines) + Hygiene tools + Save & Next button
 
 **Hygiene tools:**
 - Collapsible help accordion explaining button functions (above buttons)

@@ -23,7 +23,7 @@ The application is built using **Python** and **Gradio**.
         *   `state.py`: Singleton `ProjectState` class to manage the active session (image paths, captions, masks).
         *   `captioning.py`: Wrapper for the `Florence-2` model using `transformers` and `torch`.
     *   `ui/`: Frontend components.
-        *   `wizard.py`: Implements the 4-step guided workflow (Import -> Caption -> Review -> Export).
+        *   `wizard.py`: Implements the 4-step guided workflow (Import -> Image Tools -> Captioning -> Export).
         *   `dashboard.py`: Placeholder for advanced features.
 *   `pyproject.toml`: Dependency configuration managed by `uv`.
 

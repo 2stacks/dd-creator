@@ -63,7 +63,7 @@ Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directo
 
 The wizard guides you through 4 steps:
 
-1. **Project Setup** - Two-column layout to configure source data (local folder or browser upload) and workspace (new project or continue existing)
+1. **Project Setup** - Configure source data (local folder or browser upload) and workspace (new project or continue existing). A project name or existing folder is required.
 2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Generate and edit captions with powerful tools:
    - Batch generation with prefix/suffix tags (trigger words, quality tags)
@@ -99,7 +99,7 @@ dd-creator/
 uv add <package_name>
 
 # Run with auto-reload (if using gradio dev mode)
-uv run app.py
+uv run gradio app.py
 ```
 
 ## License

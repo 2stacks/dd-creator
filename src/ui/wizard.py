@@ -122,7 +122,7 @@ def render_wizard():
         elif existing_output and existing_output.strip() and existing_output.strip() != DEFAULT_OUTPUT:
             final_output_path = existing_output.strip()
         else:
-            final_output_path = DEFAULT_OUTPUT
+            return "No output project defined. Either enter a Project Name (New Project tab) or select an existing project folder (Continue Existing tab).", gr.update(interactive=False)
 
         # Create output dir if it doesn't exist
         if not os.path.exists(final_output_path):
@@ -263,25 +263,21 @@ def render_wizard():
                 except:
                     pass
 
-            # Return: path, original_img, status for each tab, existing processed images, reset states, tab selection
+            # Return: path, original_img, status, existing processed images, reset states, tab selection
             return (
                 path,                    # selected_path_state
                 img,                     # workbench_original
-                status_text,             # original_status
+                status_text,             # workbench_status
                 existing_upscaled,       # workbench_upscaled
-                "Run upscale to generate." if not existing_upscaled else "Upscaled version loaded.",  # upscale_status
                 existing_mask,           # workbench_mask
-                "Create mask to generate." if not existing_mask else "Mask loaded.",  # mask_status
                 existing_transparent,    # workbench_transparent
-                "Create transparent to generate." if not existing_transparent else "Transparent loaded.",  # transparent_status
                 existing_upscaled,       # upscaled_image_state (preserve existing upscaled for mask/transparent)
                 None,                    # resized_image_state (reset)
                 None,                    # mask_image_state (reset)
                 None,                    # transparent_image_state (reset)
                 gr.Tabs(selected="tab_original")  # Reset to Original tab
             )
-        return (None, None, "Select an image from the library.", None, "Select an image first.",
-                None, "Select an image first.", None, "Select an image first.", None, None, None, None,
+        return (None, None, "Select an image from the library.", None, None, None, None, None, None, None,
                 gr.Tabs(selected="tab_original"))
 
     def upscale_action(image_path, model_name, target_resolution):
@@ -1228,11 +1224,6 @@ def render_wizard():
                         with gr.Tabs() as source_tabs:
                             # Local Folder Tab
                             with gr.TabItem("Local Folder", id="local_folder"):
-                                input_dir = gr.Textbox(
-                                    label="Path to Source Images",
-                                    placeholder="Path to source images",
-                                    value="datasets/input"
-                                )
                                 with gr.Accordion("Browse Directories", open=False):
                                     gr.Markdown("*Click any file to select its containing folder.*")
                                     input_explorer = gr.FileExplorer(
@@ -1241,6 +1232,11 @@ def render_wizard():
                                         file_count="single",
                                         height=250
                                     )
+                                input_dir = gr.Textbox(
+                                    label="Image Source Directory",
+                                    placeholder="Path to source images",
+                                    value="datasets/input"
+                                )
 
                             # Upload Tab
                             with gr.TabItem("Upload", id="upload"):
@@ -1249,6 +1245,7 @@ def render_wizard():
                                     file_types=["image"],
                                     label="Upload Images"
                                 )
+                                gr.Markdown("*Images are uploaded to the folder set on the Local Folder tab. If no custom folder is set, a new folder will be created at `datasets/input/uploads/`.*")
                                 upload_status = gr.Textbox(
                                     label="Upload Status",
                                     interactive=False,
@@ -1261,19 +1258,17 @@ def render_wizard():
                         with gr.Tabs() as workspace_tabs:
                             # New Project Tab
                             with gr.TabItem("New Project", id="new_project"):
+                                with gr.Accordion("About Projects", open=False):
+                                    gr.Markdown("""**New Project** creates a fresh folder at `datasets/output/[project_name]/` for your processed images and captions.
+
+**Continue Existing** (next tab) lets you resume work on a previous project by selecting its output folder.""")
                                 project_name = gr.Textbox(
                                     label="Project Name",
                                     placeholder="e.g. my_awesome_dataset"
                                 )
-                                gr.Markdown("*Will create: datasets/output/[project_name]/*")
 
                             # Continue Existing Tab
                             with gr.TabItem("Continue Existing", id="continue_existing"):
-                                output_dir = gr.Textbox(
-                                    label="Output Directory",
-                                    placeholder="Path to existing output folder",
-                                    value="datasets/output"
-                                )
                                 with gr.Accordion("Browse Existing Projects", open=False):
                                     gr.Markdown("*Click any file to select its containing folder.*")
                                     output_explorer = gr.FileExplorer(
@@ -1282,6 +1277,11 @@ def render_wizard():
                                         file_count="single",
                                         height=250
                                     )
+                                output_dir = gr.Textbox(
+                                    label="Output Directory",
+                                    placeholder="Path to existing output folder",
+                                    value="datasets/output"
+                                )
 
                 # Full-width Scan Button
                 scan_btn = gr.Button("Scan & Initialize Project", variant="primary", size="lg")
@@ -1318,6 +1318,11 @@ def render_wizard():
                             allow_preview=False,
                             show_label=False
                         )
+                        workbench_status = gr.Textbox(
+                            label="Status",
+                            value="Select an image from the library.",
+                            interactive=False
+                        )
 
                     # COLUMN 2: THE WORKBENCH (60%)
                     with gr.Column(scale=60):
@@ -1329,11 +1334,6 @@ def render_wizard():
                                     label="Original Image",
                                     type="pil",
                                     height=500,
-                                    interactive=False
-                                )
-                                original_status = gr.Textbox(
-                                    label="Status",
-                                    value="Select an image from the library.",
                                     interactive=False
                                 )
                                 resize_target_slider = gr.Slider(
@@ -1355,11 +1355,6 @@ def render_wizard():
                                     label="Upscaled Image",
                                     type="pil",
                                     height=500,
-                                    interactive=False
-                                )
-                                upscale_status = gr.Textbox(
-                                    label="Status",
-                                    value="Select an image, then run upscale.",
                                     interactive=False
                                 )
                                 with gr.Row():
@@ -1392,11 +1387,6 @@ def render_wizard():
                                     height=500,
                                     interactive=False
                                 )
-                                mask_status = gr.Textbox(
-                                    label="Status",
-                                    value="Select an image, then create mask.",
-                                    interactive=False
-                                )
                                 with gr.Row():
                                     invert_mask_check = gr.Checkbox(
                                         label="Invert Mask",
@@ -1414,18 +1404,14 @@ def render_wizard():
                                     height=500,
                                     interactive=False
                                 )
-                                transparent_status = gr.Textbox(
-                                    label="Status",
-                                    value="Select an image, then create transparent.",
-                                    interactive=False
-                                )
                                 with gr.Row():
                                     alpha_threshold_slider = gr.Slider(
                                         label="Alpha Threshold",
                                         minimum=0,
                                         maximum=255,
                                         value=128,
-                                        step=1
+                                        step=1,
+                                        info="Pixels with opacity below this value are removed; lower values preserve faint details like hair or smoke."
                                     )
                                 with gr.Row():
                                     create_transparent_btn = gr.Button("Create Transparent", variant="secondary")
@@ -1575,14 +1561,19 @@ def render_wizard():
                             allow_preview=False,
                             show_label=False
                         )
+                        save_status = gr.Textbox(
+                            label="Status",
+                            value="Select an image from the gallery.",
+                            interactive=False
+                        )
+
+                    # RIGHT COLUMN: Editor (60%)
+                    with gr.Column(scale=60):
                         search_filter_box = gr.Textbox(
                             label="Filter",
                             placeholder="Filter images by caption content...",
                             max_lines=1
                         )
-
-                    # RIGHT COLUMN: Editor (60%)
-                    with gr.Column(scale=60):
                         editor_preview = gr.Image(
                             type="pil",
                             height=500,
@@ -1611,12 +1602,6 @@ def render_wizard():
                         with gr.Row():
                             save_next_btn = gr.Button("Save & Next", variant="primary", size="lg", scale=3)
                             delete_image_btn = gr.Button("Delete Image", variant="stop", size="lg", scale=1)
-
-                        save_status = gr.Textbox(
-                            label="Status",
-                            value="Select an image from the gallery.",
-                            interactive=False
-                        )
 
                 # Bulk Edit Tools (Accordion, Closed)
                 with gr.Accordion("Bulk Edit Tools", open=False):
@@ -1714,13 +1699,10 @@ def render_wizard():
         outputs=[
             selected_path_state,       # path
             workbench_original,        # original image display
-            original_status,           # original tab status
+            workbench_status,          # unified status
             workbench_upscaled,        # existing upscaled (if any)
-            upscale_status,            # upscale tab status
             workbench_mask,            # existing mask (if any)
-            mask_status,               # mask tab status
             workbench_transparent,     # existing transparent (if any)
-            transparent_status,        # transparent tab status
             upscaled_image_state,      # reset upscaled state
             resized_image_state,       # reset resized state
             mask_image_state,          # reset mask state
@@ -1733,32 +1715,32 @@ def render_wizard():
     save_original_btn.click(
         save_original_action,
         inputs=[selected_path_state, workbench_original],
-        outputs=original_status
+        outputs=workbench_status
     )
 
     resize_btn.click(
         resize_action,
         inputs=[selected_path_state, resize_target_slider],
-        outputs=[workbench_original, resized_image_state, original_status]
+        outputs=[workbench_original, resized_image_state, workbench_status]
     )
 
     save_resized_btn.click(
         save_resized_action,
         inputs=[selected_path_state, resized_image_state],
-        outputs=original_status
+        outputs=workbench_status
     )
 
     # TAB 2: Upscale - Run and Save buttons
     run_upscale_btn.click(
         upscale_action,
         inputs=[selected_path_state, upscaler_model, target_res_slider],
-        outputs=[workbench_upscaled, upscaled_image_state, upscale_status]
+        outputs=[workbench_upscaled, upscaled_image_state, workbench_status]
     )
 
     save_upscale_btn.click(
         save_upscale_action,
         inputs=[selected_path_state, workbench_upscaled],
-        outputs=upscale_status
+        outputs=workbench_status
     )
 
     refresh_models_btn.click(refresh_upscaler_models, outputs=upscaler_model)
@@ -1767,26 +1749,26 @@ def render_wizard():
     create_mask_btn.click(
         generate_mask_action,
         inputs=[selected_path_state, upscaled_image_state, resized_image_state, invert_mask_check],
-        outputs=[workbench_mask, mask_image_state, mask_status]
+        outputs=[workbench_mask, mask_image_state, workbench_status]
     )
 
     save_mask_btn.click(
         save_mask_action,
         inputs=[selected_path_state, workbench_mask],
-        outputs=mask_status
+        outputs=workbench_status
     )
 
     # TAB 4: Transparent - Create and Save buttons (use upscaled_image_state for reliable full-res data)
     create_transparent_btn.click(
         generate_transparent_action,
         inputs=[selected_path_state, upscaled_image_state, resized_image_state, alpha_threshold_slider],
-        outputs=[workbench_transparent, transparent_image_state, transparent_status]
+        outputs=[workbench_transparent, transparent_image_state, workbench_status]
     )
 
     save_transparent_btn.click(
         save_transparent_action,
         inputs=[selected_path_state, workbench_transparent],
-        outputs=transparent_status
+        outputs=workbench_status
     )
 
     # Bulk operations
@@ -1800,7 +1782,7 @@ def render_wizard():
     )
 
     # Unload models (on Upscale tab)
-    unload_btn.click(on_unload_all_models, outputs=upscale_status)
+    unload_btn.click(on_unload_all_models, outputs=workbench_status)
 
     def go_to_step3():
         """Navigate to Step 3 and refresh output gallery."""
