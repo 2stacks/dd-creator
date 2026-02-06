@@ -46,7 +46,7 @@ class ProjectState:
 
     def scan_directory(self, directory: str, output_directory: str = ""):
         if not os.path.isdir(directory):
-            return "Invalid source directory"
+            return "Invalid source directory", 0, 0
         
         self.source_directory = directory
         self.output_directory = output_directory
@@ -63,7 +63,7 @@ class ProjectState:
                     # Try to load existing caption
                     # Check output directory first if set, then source
                     caption_found = False
-                    
+
                     # 1. Check Output Dir
                     if self.output_directory:
                         txt_path = self.get_output_path(img_path, ".txt")
@@ -73,7 +73,7 @@ class ProjectState:
                                     self.captions[img_path] = f.read().strip()
                                 caption_found = True
                             except: pass
-                    
+
                     # 2. Check Source Dir (if not found in output)
                     if not caption_found:
                         txt_path_src = os.path.splitext(img_path)[0] + ".txt"
@@ -81,13 +81,27 @@ class ProjectState:
                             try:
                                 with open(txt_path_src, "r", encoding="utf-8") as f:
                                     self.captions[img_path] = f.read().strip()
+                                caption_found = True
                             except:
                                 self.captions[img_path] = ""
                         else:
                             self.captions[img_path] = ""
-        
+
         self.image_paths.sort()
-        return f"Found {len(self.image_paths)} images."
+        output_count = 0
+        source_only_count = 0
+        for p in self.image_paths:
+            if not self.captions.get(p):
+                continue
+            # Check if output dir has this caption
+            if self.output_directory:
+                txt_path = self.get_output_path(p, ".txt")
+                if os.path.exists(txt_path):
+                    output_count += 1
+                    continue
+            # Must have come from source
+            source_only_count += 1
+        return f"Found {len(self.image_paths)} images.", output_count, source_only_count
 
 # Global instance
 global_state = ProjectState()

@@ -63,15 +63,17 @@ Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directo
 
 The wizard guides you through 4 steps:
 
-1. **Project Setup** - Configure source data (local folder or browser upload) and workspace (new project or continue existing). A project name or existing folder is required.
+1. **Project Setup** - Configure source data (local folder or browser upload) and workspace (new project or continue existing). Scans for existing caption files in both source and output directories so you can pick up where you left off.
 2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Generate and edit captions with powerful tools:
    - Batch generation with prefix/suffix tags (trigger words, quality tags)
    - Automatic Danbooru rating tag filtering (optional, on by default)
+   - Source caption import: existing captions from your source folder appear for review
    - Search/filter images by caption content
    - Hygiene tools: fix formatting, deduplicate tags, undo changes
    - Bulk operations: add/remove tags, search & replace across all captions
-4. **Export** - Review and finalize your dataset
+   - Validation: ensures all images have saved captions before proceeding
+4. **Export** - Review session stats (output images, saved captions, masks, etc.) and finalize your dataset
 
 ## Project Structure
 

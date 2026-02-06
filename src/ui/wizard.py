@@ -132,16 +132,22 @@ def render_wizard():
             except Exception as e:
                 return f"Error creating output directory: {e}", gr.update(interactive=False)
 
-        global_state.scan_directory(source_path, final_output_path)
+        _, output_caps, source_only_caps = global_state.scan_directory(source_path, final_output_path)
         count = len(global_state.image_paths)
 
-        # Build three-line status message with relative paths
+        # Build status message with relative paths
         source_rel = to_relative_path(source_path)
         output_rel = to_relative_path(final_output_path)
 
         lines = []
         lines.append(f"Source: {source_rel}")
         lines.append(f"Found {count} images")
+        total_caps = output_caps + source_only_caps
+        if total_caps > 0:
+            cap_line = f"Found {total_caps} existing captions"
+            if source_only_caps > 0:
+                cap_line += f" ({source_only_caps} in source only)"
+            lines.append(cap_line)
         if output_created:
             lines.append(f"Output: {output_rel} (created)")
         else:
@@ -756,7 +762,7 @@ def render_wizard():
 
         for img_path in images:
 
-            # Try to load existing caption
+            # Try to load existing caption from output dir
             txt_path = os.path.splitext(img_path)[0] + ".txt"
             if os.path.exists(txt_path):
                 try:
@@ -766,6 +772,16 @@ def render_wizard():
                     captions[img_path] = ""
             else:
                 captions[img_path] = ""
+
+        # Fall back to captions loaded during scan (e.g. source-only captions)
+        for img_path in images:
+            if not captions.get(img_path):
+                # Match by filename: find the source path that corresponds to this output image
+                basename = os.path.basename(img_path)
+                for src_path, cap in global_state.captions.items():
+                    if cap and os.path.basename(src_path) == basename:
+                        captions[img_path] = cap
+                        break
 
         images.sort()
         return images, captions
@@ -1900,14 +1916,33 @@ def render_wizard():
     )
 
     # Nav buttons (Step 3)
+    def check_unsaved_captions():
+        """Check that all output images have a saved .txt caption file on disk."""
+        if not _output_images:
+            return gr.Tabs(selected=3), gr.skip()
+        missing = []
+        for img_path in _output_images:
+            txt_path = os.path.splitext(img_path)[0] + ".txt"
+            if not os.path.exists(txt_path):
+                missing.append(os.path.basename(img_path))
+        if missing:
+            msg = f"{len(missing)} image(s) have no saved caption: {', '.join(missing[:10])}"
+            if len(missing) > 10:
+                msg += f" ... and {len(missing) - 10} more"
+            return gr.skip(), msg
+        return gr.Tabs(selected=3), gr.skip()
+
     back_btn_3.click(lambda: gr.Tabs(selected=1), outputs=tabs)
-    next_btn_3.click(lambda: gr.Tabs(selected=3), outputs=tabs)
+    next_btn_3.click(check_unsaved_captions, outputs=[tabs, save_status])
 
     # Step 4: Export
     def get_stats():
+        output_images, output_captions = get_output_images()
+        saved_captions = sum(1 for c in output_captions.values() if c)
         return {
-            "Images Found": len(global_state.image_paths),
-            "Captions Loaded/Created": len(global_state.captions),
+            "Source Images": len(global_state.image_paths),
+            "Output Images": len(output_images),
+            "Saved Captions": saved_captions,
             "Masks Created": len(global_state.masks),
             "Transparent Images": len(global_state.transparent),
             "Upscaled Images": len(global_state.upscaled)

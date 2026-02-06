@@ -84,6 +84,7 @@ Two-column layout with tabbed sections for source data and workspace configurati
 **Scan Logic (value-based, no tab state tracking):**
 - Source: Uses upload staging only if local folder is still the default. A custom local folder path always takes priority.
 - Output: Project Name (creates `datasets/output/<name>/`) > existing Output Directory. Using the bare `datasets/output/` as output is not allowed — users must define a project name or select an existing project folder.
+- Scan reports existing caption counts: output captions vs source-only captions (`.txt` in source dir with no corresponding output `.txt`). Source-only captions are loaded into memory for review in Step 3 but are not saved until the user explicitly saves them.
 
 ## Step 2: Image Tools UI Structure
 
@@ -132,6 +133,16 @@ Two-column layout (40/60 split) with gallery height=700 and image preview height
 **Rating Tag Filtering:** Filters Danbooru rating tags during batch generation. Removes prefixed tags (rating:general, etc.) anywhere, and standalone tags (general, sensitive, questionable, explicit) from first/last position only.
 
 Gallery filtering tracks displayed images separately (`_displayed_images`) so selection works correctly with filtered results.
+
+**Source Caption Fallback:** `get_output_images()` falls back to `global_state.captions` (populated during Step 1 scan) when an output image has no `.txt` file on disk. Matching is by filename basename. This allows source-only captions to appear in the editor for review.
+
+**Next Button Validation:** The Step 3 "Next >" button checks that all output images have a saved `.txt` caption file on disk before proceeding to Step 4. Images with only in-memory captions (from source fallback) are flagged.
+
+## Step 4: Export UI Structure
+
+- Session stats JSON display showing Source Images, Output Images, Saved Captions, Masks, Transparent Images, Upscaled Images
+- Stats are computed from actual output directory contents (not in-memory state) for accuracy
+- Refresh Stats button + Back navigation
 
 ## Gradio 6.0+ Specifics
 
