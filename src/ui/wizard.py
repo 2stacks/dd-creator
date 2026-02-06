@@ -790,8 +790,6 @@ def render_wizard():
         if index < len(_displayed_images):
             path = _displayed_images[index]
             caption = _output_captions.get(path, "")
-            # Store caption on selection so Undo can revert to saved version
-            store_undo_state(path, caption)
             # Load the image for preview
             try:
                 img = Image.open(path)
@@ -812,8 +810,6 @@ def render_wizard():
         try:
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(new_caption)
-            # Update undo baseline to the newly saved version
-            store_undo_state(path, new_caption)
             return f"Saved caption for {os.path.basename(path)}"
         except Exception as e:
             return f"Error: {e}"
@@ -839,8 +835,6 @@ def render_wizard():
 
         next_path = _output_images[next_index]
         next_caption = _output_captions.get(next_path, "")
-        # Store undo baseline for the next image
-        store_undo_state(next_path, next_caption)
         try:
             next_img = Image.open(next_path)
             next_img = ImageOps.exif_transpose(next_img)
@@ -876,32 +870,36 @@ def render_wizard():
         except Exception as e:
             return f"Delete error: {e}", _output_images, None, "", -1
 
-    # State for undo functionality
-    _undo_caption = {"path": None, "caption": None}
+    # Regex to strip BOM + zero-width invisible characters that sneak in via clipboard/browser
+    _INVISIBLE_RE = None
+
+    def _clean_tag(tag):
+        """Normalize a tag: strip invisible chars, collapse whitespace."""
+        import re
+        nonlocal _INVISIBLE_RE
+        if _INVISIBLE_RE is None:
+            _INVISIBLE_RE = re.compile(r'[\ufeff\u200b\u200c\u200d\u2060\ufffe]')
+        tag = _INVISIBLE_RE.sub('', tag)
+        tag = re.sub(r'\s+', ' ', tag).strip()
+        return tag
 
     def fix_format_action(caption):
-        """Fix caption formatting: normalize commas, spacing, remove empty tags."""
+        """Fix caption formatting: normalize commas, spacing, collapse extra whitespace, remove empty tags."""
         if not caption:
             return caption, "Nothing to fix."
 
-        # Store for undo
         original = caption
 
         # Split by comma, clean each tag, rejoin
-        tags = [t.strip() for t in caption.split(",")]
-        # Remove empty tags and duplicates while preserving order
-        seen = set()
-        cleaned = []
-        for tag in tags:
-            if tag and tag not in seen:
-                cleaned.append(tag)
-                seen.add(tag)
+        cleaned = [_clean_tag(t) for t in caption.split(",")]
+        # Remove empty tags
+        cleaned = [tag for tag in cleaned if tag]
 
         result = ", ".join(cleaned)
 
         if result == original:
             return result, "Already formatted correctly."
-        return result, f"Fixed formatting ({len(tags)} → {len(cleaned)} tags)."
+        return result, f"Fixed formatting ({len(original.split(','))} → {len(cleaned)} tags)."
 
     def dedup_tags_action(caption):
         """Remove duplicate tags while preserving order."""
@@ -909,7 +907,8 @@ def render_wizard():
             return caption, "Nothing to deduplicate."
 
         original = caption
-        tags = [t.strip() for t in caption.split(",")]
+        # Normalize: split by comma, strip invisible chars + whitespace
+        tags = [_clean_tag(t) for t in caption.split(",")]
         seen = set()
         unique = []
         duplicates = 0
@@ -925,19 +924,22 @@ def render_wizard():
 
         if duplicates == 0:
             return result, "No duplicates found."
-        return result, f"Removed {duplicates} duplicate(s)."
-
-    def store_undo_state(path, caption):
-        """Store current state for undo."""
-        _undo_caption["path"] = path
-        _undo_caption["caption"] = caption
+        return result, f"Removed {duplicates} duplicate(s) ({len(unique)} unique tags)."
 
     def undo_changes_action(current_path, current_caption):
-        """Restore caption to the last saved version."""
-        if _undo_caption["path"] == current_path and _undo_caption["caption"] is not None:
-            restored = _undo_caption["caption"]
-            return restored, "Restored to last saved caption."
-        return current_caption, "Nothing to undo."
+        """Reload caption from disk."""
+        if not current_path:
+            return current_caption, "No image selected."
+        txt_path = os.path.splitext(current_path)[0] + ".txt"
+        if os.path.exists(txt_path):
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    restored = f.read().strip()
+                _output_captions[current_path] = restored
+                return restored, "Reloaded caption from disk."
+            except Exception as e:
+                return current_caption, f"Error reading file: {e}"
+        return "", "No caption file on disk."
 
     def filter_gallery_action(search_text):
         """Filter gallery images by caption content."""
@@ -1082,7 +1084,13 @@ def render_wizard():
         pairs_str = "; ".join([f"{o} → {n}" for o, n in pairs[:2]])
         if len(pairs) > 2:
             pairs_str += f"... (+{len(pairs) - 2} more)"
-        return f"Applied [{pairs_str}] to {count} captions."
+        result = f"Applied [{pairs_str}] to {count}/{len(_output_images)} captions."
+        if count == 0 and _output_images:
+            if exact_match:
+                result += " Try Partial Match for natural language captions."
+            else:
+                result += " No matches found in any caption."
+        return result
 
     # Danbooru rating tags to filter (with "rating:" prefix)
     RATING_TAGS_PREFIXED = {"rating:general", "rating:sensitive", "rating:questionable", "rating:explicit"}
@@ -1492,7 +1500,7 @@ def render_wizard():
                 # Hidden states
                 current_path_state = gr.State()
                 current_index_state = gr.State(-1)
-                undo_caption_state = gr.State(None)
+                hygiene_result_state = gr.State("")
 
                 # PHASE 1: Caption / Tag Generation (Accordion, Open by Default)
                 with gr.Accordion("Caption / Tag Generation", open=True):
@@ -1594,9 +1602,9 @@ def render_wizard():
                             dedup_btn = gr.Button("Dedup Tags")
                             undo_btn = gr.Button("Undo Changes")
                         with gr.Accordion("What do these buttons do?", open=False):
-                            gr.Markdown("""- **Fix Format**: Normalize comma spacing and remove empty tags
+                            gr.Markdown("""- **Fix Format**: Normalize comma spacing, collapse extra whitespace, remove empty tags
 - **Dedup Tags**: Remove duplicate tags (case-insensitive)
-- **Undo Changes**: Revert to last saved caption""")
+- **Undo Changes**: Reload caption from disk""")
 
                         # Navigation
                         with gr.Row():
@@ -1641,9 +1649,10 @@ def render_wizard():
                         with gr.Column():
                             gr.Markdown("**Search & Replace**")
                             bulk_exact_match = gr.Radio(
-                                choices=["Exact Match", "Partial Match"],
-                                value="Exact Match",
-                                show_label=False
+                                choices=["Partial Match", "Exact Match"],
+                                value="Partial Match",
+                                show_label=False,
+                                info="Partial: substring replace. Exact: whole comma-separated tags only."
                             )
                             bulk_replace_box = gr.Textbox(
                                 placeholder="old, new; red, blue",
@@ -1818,32 +1827,45 @@ def render_wizard():
     )
 
     # Hygiene tools
-    def fix_format_with_undo(caption, current_path):
-        """Fix format and store undo state."""
-        store_undo_state(current_path, caption)
+    def fix_format_wrapper(caption, current_path):
+        """Fix format on current caption."""
         new_caption, status = fix_format_action(caption)
         return new_caption, status
 
-    def dedup_with_undo(caption, current_path):
-        """Deduplicate tags and store undo state."""
-        store_undo_state(current_path, caption)
+    def dedup_wrapper(caption, current_path):
+        """Deduplicate tags on current caption."""
         new_caption, status = dedup_tags_action(caption)
         return new_caption, status
 
+    # Hygiene tools write to a hidden State first, then .then() pushes to the textbox.
+    # This avoids a Gradio bug where a textbox used as both input and output of the
+    # same callback doesn't visually refresh.
     fix_format_btn.click(
-        fix_format_with_undo,
+        fix_format_wrapper,
         inputs=[editor_caption, current_path_state],
-        outputs=[editor_caption, save_status]
+        outputs=[hygiene_result_state, save_status]
+    ).then(
+        lambda cap: cap,
+        inputs=hygiene_result_state,
+        outputs=editor_caption
     )
     dedup_btn.click(
-        dedup_with_undo,
+        dedup_wrapper,
         inputs=[editor_caption, current_path_state],
-        outputs=[editor_caption, save_status]
+        outputs=[hygiene_result_state, save_status]
+    ).then(
+        lambda cap: cap,
+        inputs=hygiene_result_state,
+        outputs=editor_caption
     )
     undo_btn.click(
         undo_changes_action,
         inputs=[current_path_state, editor_caption],
-        outputs=[editor_caption, save_status]
+        outputs=[hygiene_result_state, save_status]
+    ).then(
+        lambda cap: cap,
+        inputs=hygiene_result_state,
+        outputs=editor_caption
     )
 
     # Save & Next button

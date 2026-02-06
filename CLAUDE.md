@@ -119,14 +119,15 @@ Two-column layout (40/60 split) with gallery height=700 and image preview height
 
 **Hygiene tools:**
 - Collapsible help accordion explaining button functions (above buttons)
-- Fix Format: Normalize comma spacing, remove empty tags
-- Dedup Tags: Remove duplicate tags (case-insensitive)
-- Undo Changes: Revert to caption before last hygiene action
+- Fix Format: Normalize comma spacing, collapse extra whitespace, strip invisible Unicode chars, remove empty tags
+- Dedup Tags: Remove duplicate tags (case-insensitive), strips invisible chars before comparing
+- Undo Changes: Reload caption from disk (replaces in-memory undo tracking)
+- All hygiene tools use a `gr.State` + `.then()` chain to update the textbox (workaround for Gradio bug where a textbox used as both input and output of the same callback doesn't visually refresh)
 
-**Bulk Tagging Tools accordion (closed by default):**
+**Bulk Edit Tools accordion (closed by default):**
 - Add Tags: Prepend/Append radio + tags input + Add to All button
 - Remove Tags: Comma-separated tags input + Remove from All button
-- Search & Replace: Exact/Partial match radio + semicolon-separated pairs + Replace All button
+- Search & Replace: Partial/Exact match radio (default: Partial) + semicolon-separated pairs + Replace All button. Partial match does substring replace (works with natural language captions). Exact match replaces whole comma-separated tags only.
 
 **Rating Tag Filtering:** Filters Danbooru rating tags during batch generation. Removes prefixed tags (rating:general, etc.) anywhere, and standalone tags (general, sensitive, questionable, explicit) from first/last position only.
 
@@ -138,6 +139,7 @@ Gallery filtering tracks displayed images separately (`_displayed_images`) so se
 - Use `gr.ImageEditor` instead of deprecated `Image(tool="sketch")`
 - `ImageEditor` with `type="filepath"` returns dict with `"layers"` key
 - Images downscaled to 1024px max before editor display for browser stability
+- **Textbox input/output bug:** When a Textbox is used as both input and output of the same `.click()` callback, the textbox may not visually refresh. Workaround: write result to a hidden `gr.State`, then chain `.then(lambda x: x, inputs=state, outputs=textbox)` to push the value in a separate event cycle.
 
 ## GPU Memory Reference
 
