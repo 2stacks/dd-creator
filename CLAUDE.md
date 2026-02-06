@@ -26,6 +26,8 @@ src/
     captioning.py         # ML model wrappers (Florence2, BLIP, JoyCaption, WD14 ONNX)
     segmentation.py       # BiRefNet background removal and mask generation
     upscaling.py          # Real-ESRGAN/Spandrel upscaling with tiled processing
+    inpainting.py         # LaMa + Stable Diffusion inpainting backends
+    sam_segmenter.py      # MobileSAM click-to-segment for inpainting masks
     birefnet_impl/        # Local BiRefNet model implementation (avoids trust_remote_code)
   ui/
     wizard.py             # 4-step guided workflow (Import → Image Tools → Captioning → Export)
@@ -37,15 +39,17 @@ src/
 **State Management:** `global_state` singleton in `state.py` holds project data:
 - `source_directory`, `output_directory` - separate input/output paths
 - `image_paths` - list of source images
-- `captions`, `masks`, `upscaled`, `transparent` - dicts mapping source paths to outputs
+- `captions`, `masks`, `upscaled`, `transparent`, `inpainted` - dicts mapping source paths to outputs
 
-**Model Lifecycle:** All GPU models follow lazy-load pattern. Models are loaded on-demand and must be explicitly unloaded with `model.unload_model()` followed by `torch.cuda.empty_cache()` and `gc.collect()` to free VRAM. Global instance getters: `get_captioner()`, `get_segmenter()`, `get_upscaler()`.
+**Model Lifecycle:** All GPU models follow lazy-load pattern. Models are loaded on-demand and must be explicitly unloaded with `model.unload_model()` followed by `torch.cuda.empty_cache()` and `gc.collect()` to free VRAM. Global instance getters: `get_captioner()`, `get_segmenter()`, `get_upscaler()`, `get_lama_inpainter()`, `get_sd_inpainter()`, `get_sam_segmenter()`.
 
 **File I/O:**
 - Captions: `.txt` files (UTF-8) in output directory
 - Masks: Binary PNG files in output directory
+- Inpainted images: `<basename>_inpainted.jpg` (98% quality) in output directory
 - Model cache: `.hf_cache/` directory (HuggingFace models)
 - Upscaler models: `.models/` directory for user-provided `.pth`/`.safetensors` files
+- SAM checkpoint: `.models/mobile_sam.pt` (auto-downloaded from HuggingFace)
 
 ## Step 1: Project Setup UI Structure
 
@@ -88,21 +92,34 @@ Two-column layout with tabbed sections for source data and workspace configurati
 
 ## Step 2: Image Tools UI Structure
 
-Two-column layout (40/60 split) with gallery height=700 and image viewer height=500.
+Two-column layout (40/60 split) with gallery height=700 and image viewer height=500. Image previews use `show_label=False` — tabs provide context.
 
-**Left column (40%):** Image gallery + unified Status textbox below gallery. All workbench actions across all tabs output status messages to this single status bar.
+**Left column (40%):** Image gallery + unified Status textbox below gallery. All workbench actions across all tabs output status messages to this single status bar. First image auto-selects when Step 2 loads.
 
 **Workbench (per-image editing, right column 60%):**
-- Original tab: View/resize/save individual images
-- Upscale tab: Real-ESRGAN upscaling with model selector and "Unload All Models" button
-- Mask tab: Generate segmentation masks with invert option
-- Transparent tab: Remove backgrounds with alpha threshold (info text on slider)
+- Resize tab: View/resize/save individual images
+- Upscale tab: Real-ESRGAN upscaling with model selector, Save Original / Upscale / Save Upscale buttons, "Unload All Models" button
+- Inpaint tab: Mask creation + inpainting (see below)
+- Mask tab: Generate BiRefNet segmentation masks with invert option
+- Transparent tab: Remove backgrounds with alpha threshold
+
+**Inpaint tab sub-tabs:**
+- Manual Mask: Click two points to draw rectangle mask regions (undo/clear)
+- SAM Click: MobileSAM click-to-segment for object-based masks (undo/clear)
+- Watermark Preset: Quick rectangle masks for common watermark positions with width/height % sliders (add/undo/clear)
+- Generate Inpaint: Backend selector (LaMa/SD 1.5/SDXL), prompt (SD only), advanced settings accordion (negative prompt, steps, guidance, strength), Run Inpaint / Save Inpaint buttons, Unload All Models button, Model Information accordion
+
+**Image source priority chain:** Mask, Transparent, and Inpaint tabs use the best available source image. Priority: inpainted > upscaled > resized > original. When resize, upscale, or inpaint completes, downstream tab previews update automatically via `.then()` chains.
+
+**Inpaint tool state tracking:** Each sub-tab uses `TabItem.select()` to update an `inpaint_tool_state` (`gr.State`). The image click handler routes to Manual Mask or SAM Click based on this state.
+
+**Mask compositing:** All inpaint mask sources (rectangles, SAM mask, watermark presets) are combined via binary OR in `composite_masks()`. A red overlay preview is generated server-side with `create_mask_overlay()`. Preset masks are stored as a list for undo support.
 
 **Bulk Actions accordion (batch processing):**
 - Left column: Smart Processing (passthrough/upscale/downscale routing by image size)
 - Right column: Mask Generation, Background Removal, Bypass Editing (copy source to output)
 
-Gallery selection resets workbench to Original tab. All save buttons use `variant="primary"` (purple).
+Gallery selection resets workbench to Resize tab. All save buttons use `variant="primary"` (purple).
 
 ## Step 3: Captioning UI Structure
 
@@ -140,7 +157,7 @@ Gallery filtering tracks displayed images separately (`_displayed_images`) so se
 
 ## Step 4: Export UI Structure
 
-- Session stats JSON display showing Source Images, Output Images, Saved Captions, Masks, Transparent Images, Upscaled Images
+- Session stats JSON display showing Source Images, Output Images, Saved Captions, Masks, Transparent Images, Upscaled Images, Inpainted Images
 - Stats are computed from actual output directory contents (not in-memory state) for accuracy
 - Refresh Stats button + Back navigation
 
@@ -164,3 +181,7 @@ Gallery filtering tracks displayed images separately (`_displayed_images`) so se
 **Image Processing:**
 - BiRefNet segmentation: ~4GB VRAM
 - Real-ESRGAN upscaling: ~2-4GB VRAM (tiled processing for large images)
+- MobileSAM (click-to-segment): ~1GB VRAM (cached image embeddings)
+- LaMa inpainting: ~2GB VRAM (fast, no prompt needed)
+- SD 1.5 inpainting: ~6GB VRAM (prompt-guided)
+- SDXL inpainting: ~10GB VRAM (highest quality, requires 12GB+ GPU)

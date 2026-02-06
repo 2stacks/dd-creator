@@ -11,6 +11,8 @@ from src.core.upscaling import (
     get_upscaler, get_available_models, should_upscale, resize_to_target,
     process_image, ProcessorAction
 )
+from src.core.sam_segmenter import get_sam_segmenter
+from src.core.inpainting import get_lama_inpainter, get_sd_inpainter, SDInpainter
 
 def render_wizard():
     # Ensure default directories exist for FileExplorer components
@@ -229,9 +231,8 @@ def render_wizard():
             except: pass
         return f"{mode.capitalize()}ed text to {count} captions."
 
-    def on_gallery_select(evt: gr.SelectData):
-        """Handle gallery selection in Step 2."""
-        index = evt.index
+    def _select_image_by_index(index):
+        """Core logic for selecting an image by index in Step 2."""
         if index < len(global_state.image_paths):
             path = global_state.image_paths[index]
             # Load original image
@@ -250,6 +251,7 @@ def render_wizard():
             existing_upscaled = None
             existing_mask = None
             existing_transparent = None
+            existing_inpainted = None
 
             if proc_status["has_upscaled"] and path in global_state.upscaled:
                 try:
@@ -269,22 +271,59 @@ def render_wizard():
                 except:
                     pass
 
-            # Return: path, original_img, status, existing processed images, reset states, tab selection
+            if proc_status["has_inpainted"] and path in global_state.inpainted:
+                try:
+                    existing_inpainted = Image.open(global_state.inpainted[path])
+                except:
+                    pass
+
+            # Best available source: upscaled > original
+            best_source = existing_upscaled if existing_upscaled is not None else img
+            # For mask/transparent: inpainted > upscaled > original
+            best_for_downstream = existing_inpainted if existing_inpainted is not None else best_source
+            upscale_display = best_source
+            mask_display = existing_mask if existing_mask is not None else best_for_downstream
+            transparent_display = existing_transparent if existing_transparent is not None else best_for_downstream
+            inpaint_display = existing_inpainted if existing_inpainted is not None else best_source
             return (
                 path,                    # selected_path_state
                 img,                     # workbench_original
                 status_text,             # workbench_status
-                existing_upscaled,       # workbench_upscaled
-                existing_mask,           # workbench_mask
-                existing_transparent,    # workbench_transparent
+                upscale_display,         # workbench_upscaled
+                mask_display,            # workbench_mask
+                transparent_display,     # workbench_transparent
                 existing_upscaled,       # upscaled_image_state (preserve existing upscaled for mask/transparent)
                 None,                    # resized_image_state (reset)
                 None,                    # mask_image_state (reset)
                 None,                    # transparent_image_state (reset)
-                gr.Tabs(selected="tab_original")  # Reset to Original tab
+                gr.Tabs(selected="tab_original"),  # Reset to Original tab
+                inpaint_display,         # workbench_inpaint (show existing result or original)
+                # Inpainting state resets
+                [],                      # rect_list_state
+                None,                    # rect_first_click_state
+                None,                    # inpaint_mask_state
+                [],                      # sam_points_state
+                [],                      # sam_labels_state
+                None,                    # sam_mask_state
+                [],                      # preset_mask_state
+                None,                    # inpaint_result_state
             )
         return (None, None, "Select an image from the library.", None, None, None, None, None, None, None,
-                gr.Tabs(selected="tab_original"))
+                gr.Tabs(selected="tab_original"),
+                None, [], None, None, [], [], None, [], None)
+
+    def on_gallery_select(evt: gr.SelectData):
+        """Handle gallery selection in Step 2."""
+        return _select_image_by_index(evt.index)
+
+    def auto_select_first_image():
+        """Auto-select first image when Step 2 tab loads."""
+        gallery_data = global_state.image_paths
+        if not gallery_data:
+            result = _select_image_by_index(-1)  # triggers the empty fallback
+            return (gallery_data,) + result
+        result = _select_image_by_index(0)
+        return (gallery_data,) + result
 
     def upscale_action(image_path, model_name, target_resolution):
         """Upscale the image with smart resize for training.
@@ -310,16 +349,16 @@ def render_wizard():
         except Exception as e:
             return None, None, f"Upscale Error: {e}"
 
-    def generate_mask_action(image_path, upscaled_img, resized_img, invert_mask):
-        """Generate mask from processed image (upscaled/resized) if available, otherwise from original."""
+    def generate_mask_action(image_path, upscaled_img, resized_img, inpaint_result, invert_mask):
+        """Generate mask from best available image. Priority: inpainted > upscaled > resized > original."""
         if not image_path:
             return None, None, "No image selected."
 
         try:
             seg = get_segmenter()
 
-            # Priority: in-memory upscaled > in-memory resized > saved upscaled on disk > original
-            processed_img = upscaled_img if upscaled_img is not None else resized_img
+            # Priority: inpaint result > in-memory upscaled > in-memory resized > saved upscaled on disk > original
+            processed_img = inpaint_result if inpaint_result is not None else (upscaled_img if upscaled_img is not None else resized_img)
 
             if processed_img is not None:
                 # Save processed image to temp file for segmenter
@@ -333,7 +372,12 @@ def render_wizard():
 
                 mask = seg.segment(temp_path)
                 os.unlink(temp_path)
-                source_info = "upscaled image" if upscaled_img is not None else "resized image"
+                if inpaint_result is not None:
+                    source_info = "inpainted image"
+                elif upscaled_img is not None:
+                    source_info = "upscaled image"
+                else:
+                    source_info = "resized image"
             elif image_path in global_state.upscaled:
                 mask = seg.segment(global_state.upscaled[image_path])
                 source_info = "saved upscaled image"
@@ -350,16 +394,16 @@ def render_wizard():
         except Exception as e:
             return None, None, f"Mask Error: {e}"
 
-    def generate_transparent_action(image_path, upscaled_img, resized_img, alpha_threshold):
-        """Generate transparent image from processed image (upscaled/resized) if available, otherwise from original."""
+    def generate_transparent_action(image_path, upscaled_img, resized_img, inpaint_result, alpha_threshold):
+        """Generate transparent image from best available image. Priority: inpainted > upscaled > resized > original."""
         if not image_path:
             return None, None, "No image selected."
 
         try:
             seg = get_segmenter()
 
-            # Priority: in-memory upscaled > in-memory resized > saved upscaled on disk > original
-            processed_img = upscaled_img if upscaled_img is not None else resized_img
+            # Priority: inpaint result > in-memory upscaled > in-memory resized > saved upscaled on disk > original
+            processed_img = inpaint_result if inpaint_result is not None else (upscaled_img if upscaled_img is not None else resized_img)
 
             if processed_img is not None:
                 # Save processed image to temp file for segmenter
@@ -373,7 +417,12 @@ def render_wizard():
 
                 transparent = seg.segment(temp_path, return_transparent=True)
                 os.unlink(temp_path)
-                source_info = "upscaled image" if upscaled_img is not None else "resized image"
+                if inpaint_result is not None:
+                    source_info = "inpainted image"
+                elif upscaled_img is not None:
+                    source_info = "upscaled image"
+                else:
+                    source_info = "resized image"
             elif image_path in global_state.upscaled:
                 transparent = seg.segment(global_state.upscaled[image_path], return_transparent=True)
                 source_info = "saved upscaled image"
@@ -413,6 +462,25 @@ def render_wizard():
             return f"Saved {os.path.basename(output_path)} ({w}x{h}, {file_size:.0f} KB)"
         except Exception as e:
             return f"Save Error: {e}"
+
+    def propagate_source_to_tabs(upscaled_img, resized_img, mask_img, transparent_img, inpaint_result, image_path):
+        """Update mask/transparent/inpaint previews with best available source image.
+        Only updates tabs that don't already have generated output.
+        Priority for mask/transparent: inpaint result > upscaled > resized > original
+        Priority for inpaint: upscaled > resized > original"""
+        base_best = upscaled_img if upscaled_img is not None else resized_img
+        if base_best is None and image_path:
+            try:
+                base_best = Image.open(image_path)
+                base_best = ImageOps.exif_transpose(base_best)
+            except:
+                pass
+        # Mask/transparent should use inpainted image if available (workflow: inpaint then mask/transparent)
+        best_for_downstream = inpaint_result if inpaint_result is not None else base_best
+        mask_out = mask_img if mask_img is not None else best_for_downstream
+        transparent_out = transparent_img if transparent_img is not None else best_for_downstream
+        inpaint_out = inpaint_result if inpaint_result is not None else base_best
+        return mask_out, transparent_out, inpaint_out
 
     def resize_action(image_path, target_short_side):
         """Resize image to target shortest side (preview only, doesn't save)."""
@@ -548,8 +616,429 @@ def render_wizard():
             return f"Save Error: {e}"
 
 
+    # --- INPAINTING HELPERS ---
+
+    def composite_masks(image_size, rectangles=None, sam_mask=None, preset_masks=None):
+        """Combine all mask sources via binary OR into a single mask.
+
+        Args:
+            image_size: (width, height) tuple
+            rectangles: List of (x1, y1, x2, y2) tuples
+            sam_mask: PIL Image mode 'L' or None
+            preset_masks: List of PIL Image mode 'L', or single PIL Image, or None
+
+        Returns:
+            PIL Image mode 'L' (composite mask)
+        """
+        from PIL import ImageDraw
+        width, height = image_size
+        mask = Image.new("L", (width, height), 0)
+
+        if rectangles:
+            draw = ImageDraw.Draw(mask)
+            for x1, y1, x2, y2 in rectangles:
+                draw.rectangle([x1, y1, x2, y2], fill=255)
+
+        if sam_mask is not None:
+            if sam_mask.size != (width, height):
+                sam_mask = sam_mask.resize((width, height), Image.Resampling.NEAREST)
+            sam_arr = np.array(sam_mask)
+            mask_arr = np.array(mask)
+            mask = Image.fromarray(np.maximum(mask_arr, sam_arr))
+
+        if preset_masks is not None:
+            if isinstance(preset_masks, list):
+                for pm in preset_masks:
+                    if pm.size != (width, height):
+                        pm = pm.resize((width, height), Image.Resampling.NEAREST)
+                    mask = Image.fromarray(np.maximum(np.array(mask), np.array(pm)))
+            else:
+                if preset_masks.size != (width, height):
+                    preset_masks = preset_masks.resize((width, height), Image.Resampling.NEAREST)
+                mask = Image.fromarray(np.maximum(np.array(mask), np.array(preset_masks)))
+
+        return mask
+
+    def create_mask_overlay(image_path, mask):
+        """Create a red-tinted overlay showing masked areas on the original image.
+
+        Args:
+            image_path: Path to original image
+            mask: PIL Image mode 'L', white=areas to inpaint
+
+        Returns:
+            PIL Image (RGB) with red overlay
+        """
+        img = Image.open(image_path).convert("RGB")
+        img = ImageOps.exif_transpose(img)
+
+        if mask is None or np.array(mask).max() == 0:
+            return img
+
+        if mask.size != img.size:
+            mask = mask.resize(img.size, Image.Resampling.NEAREST)
+
+        # Create red overlay
+        red_overlay = Image.new("RGB", img.size, (255, 0, 0))
+        mask_alpha = mask.point(lambda x: 128 if x > 128 else 0)
+        # Composite: blend red where mask is white
+        result = Image.composite(red_overlay, img, mask_alpha.convert("L"))
+        # That makes masked areas fully red; instead blend 50/50
+        img_arr = np.array(img, dtype=np.float32)
+        red_arr = np.array(red_overlay, dtype=np.float32)
+        mask_arr = np.array(mask, dtype=np.float32) / 255.0
+        mask_3d = np.stack([mask_arr] * 3, axis=-1)
+        blended = img_arr * (1 - mask_3d * 0.5) + red_arr * (mask_3d * 0.5)
+        return Image.fromarray(blended.astype(np.uint8))
+
+    def generate_watermark_preset_mask(image_size, preset_name, width_pct, height_pct):
+        """Generate a rectangle mask for common watermark positions.
+
+        Args:
+            image_size: (width, height)
+            preset_name: One of the preset region names
+            width_pct: Width percentage (5-50)
+            height_pct: Height percentage (5-30)
+
+        Returns:
+            PIL Image mode 'L'
+        """
+        from PIL import ImageDraw
+        w, h = image_size
+        mask = Image.new("L", (w, h), 0)
+        draw = ImageDraw.Draw(mask)
+
+        rw = int(w * width_pct / 100)
+        rh = int(h * height_pct / 100)
+
+        if preset_name == "Bottom-Right Corner":
+            x1, y1 = w - rw, h - rh
+            x2, y2 = w, h
+        elif preset_name == "Bottom-Center":
+            x1, y1 = (w - rw) // 2, h - rh
+            x2, y2 = (w + rw) // 2, h
+        elif preset_name == "Bottom Strip":
+            x1, y1 = 0, h - rh
+            x2, y2 = w, h
+        elif preset_name == "Top-Left Corner":
+            x1, y1 = 0, 0
+            x2, y2 = rw, rh
+        elif preset_name == "Top-Right Corner":
+            x1, y1 = w - rw, 0
+            x2, y2 = w, rh
+        elif preset_name == "Top Strip":
+            x1, y1 = 0, 0
+            x2, y2 = w, rh
+        else:
+            return mask
+
+        draw.rectangle([x1, y1, x2, y2], fill=255)
+        return mask
+
+    def add_rectangle_to_mask(image_path, rect_list, x1, y1, x2, y2, sam_mask):
+        """Add a rectangle to the mask and return updated overlay."""
+        if not image_path:
+            return rect_list, None, None, "No image selected."
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+        except Exception as e:
+            return rect_list, None, None, f"Error: {e}"
+
+        # Clamp coordinates
+        rx1 = max(0, min(int(x1), img_w))
+        ry1 = max(0, min(int(y1), img_h))
+        rx2 = max(0, min(int(x2), img_w))
+        ry2 = max(0, min(int(y2), img_h))
+
+        if rx1 >= rx2 or ry1 >= ry2:
+            return rect_list, None, None, "Invalid rectangle (zero area)."
+
+        if rect_list is None:
+            rect_list = []
+        rect_list = rect_list + [(rx1, ry1, rx2, ry2)]
+
+        combined = composite_masks((img_w, img_h), rectangles=rect_list, sam_mask=sam_mask)
+        overlay = create_mask_overlay(image_path, combined)
+        count = len(rect_list)
+        sam_info = " + SAM region" if sam_mask is not None else ""
+        return rect_list, combined, overlay, f"{count} rectangle(s){sam_info}"
+
+    def undo_last_rectangle(image_path, rect_list, sam_mask, preset_mask):
+        """Remove last rectangle from list."""
+        if not rect_list:
+            return rect_list, None, None, "No rectangles to undo."
+
+        rect_list = rect_list[:-1]
+
+        if not image_path:
+            return rect_list, None, None, "No image selected."
+
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+        except:
+            return rect_list, None, None, "Error loading image."
+
+        combined = composite_masks((img_w, img_h), rectangles=rect_list, sam_mask=sam_mask, preset_masks=preset_mask)
+        overlay = create_mask_overlay(image_path, combined)
+        return rect_list, combined, overlay, f"{len(rect_list)} rectangle(s)"
+
+    def clear_all_masks(image_path):
+        """Clear all mask data and return clean image."""
+        if not image_path:
+            return [], None, None, None, None, "No image selected."
+        try:
+            img = Image.open(image_path).convert("RGB")
+            img = ImageOps.exif_transpose(img)
+            return [], None, None, None, img, "All masks cleared."
+        except:
+            return [], None, None, None, None, "Error loading image."
+
+
+    def add_watermark_preset(image_path, preset_name, width_pct, height_pct,
+                             rect_list, preset_list, sam_mask):
+        """Add a watermark preset region to the mask."""
+        if preset_list is None:
+            preset_list = []
+        if not image_path:
+            return preset_list, None, None, "No image selected."
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+        except Exception as e:
+            return preset_list, None, None, f"Error: {e}"
+
+        preset = generate_watermark_preset_mask((img_w, img_h), preset_name, width_pct, height_pct)
+        new_list = preset_list + [preset]
+        combined = composite_masks(
+            (img_w, img_h),
+            rectangles=rect_list,
+            sam_mask=sam_mask,
+            preset_masks=new_list
+        )
+        overlay = create_mask_overlay(image_path, combined)
+        count = len(new_list)
+        return new_list, combined, overlay, f"Added {preset_name} preset. {count} preset region(s)."
+
+    def undo_last_preset(image_path, preset_list, rect_list, sam_mask):
+        """Remove last watermark preset region."""
+        if not preset_list:
+            return preset_list, None, None, "No preset regions to undo."
+        new_list = preset_list[:-1]
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+            combined = composite_masks(
+                (img_w, img_h), rectangles=rect_list, sam_mask=sam_mask, preset_masks=new_list
+            )
+            overlay = create_mask_overlay(image_path, combined)
+            count = len(new_list)
+            return new_list, combined, overlay, f"Undid last preset. {count} preset region(s) remaining."
+        except Exception as e:
+            return new_list, None, None, f"Preset undo error: {e}"
+
+    def clear_preset_regions(image_path, rect_list, sam_mask):
+        """Clear all watermark preset regions."""
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+            combined = composite_masks(
+                (img_w, img_h), rectangles=rect_list, sam_mask=sam_mask
+            )
+            overlay = create_mask_overlay(image_path, combined)
+            return [], combined, overlay, "All preset regions cleared."
+        except:
+            return [], None, None, "All preset regions cleared."
+
+    def sam_click_action(image_path, evt_index, sam_points, sam_labels_list, rect_list, preset_mask):
+        """Handle SAM click on image for segmentation."""
+        if not image_path:
+            return sam_points, sam_labels_list, None, None, None, "No image selected."
+        if evt_index is None:
+            return sam_points, sam_labels_list, None, None, None, "Click on the image to segment."
+
+        x, y = evt_index
+        label = 1  # Always foreground
+        if sam_points is None:
+            sam_points = []
+        if sam_labels_list is None:
+            sam_labels_list = []
+
+        sam_points = sam_points + [(x, y)]
+        sam_labels_list = sam_labels_list + [label]
+
+        try:
+            sam = get_sam_segmenter()
+            points_arr = [(px, py) for px, py in sam_points]
+            labels_arr = sam_labels_list
+            sam_mask = sam.segment_multi_point(image_path, points_arr, labels_arr)
+
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+
+            combined = composite_masks(
+                (img_w, img_h),
+                rectangles=rect_list,
+                sam_mask=sam_mask,
+                preset_masks=preset_mask
+            )
+            overlay = create_mask_overlay(image_path, combined)
+
+            fg_count = sum(1 for l in sam_labels_list if l == 1)
+            bg_count = sum(1 for l in sam_labels_list if l == 0)
+            info = f"SAM: {fg_count} foreground, {bg_count} background points"
+
+            return sam_points, sam_labels_list, sam_mask, combined, overlay, info
+        except Exception as e:
+            return sam_points, sam_labels_list, None, None, None, f"SAM Error: {e}"
+
+    def undo_last_sam(image_path, sam_points, sam_labels_list, rect_list, preset_mask):
+        """Remove last SAM point and recompute mask."""
+        if not sam_points:
+            return sam_points, sam_labels_list, None, None, None, "No SAM points to undo."
+
+        sam_points = sam_points[:-1]
+        sam_labels_list = sam_labels_list[:-1]
+
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+
+            sam_mask = None
+            if sam_points:
+                sam = get_sam_segmenter()
+                sam_mask = sam.segment_multi_point(image_path, sam_points, sam_labels_list)
+
+            combined = composite_masks(
+                (img_w, img_h), rectangles=rect_list, sam_mask=sam_mask, preset_masks=preset_mask
+            )
+            overlay = create_mask_overlay(image_path, combined)
+            count = len(sam_points)
+            return sam_points, sam_labels_list, sam_mask, combined, overlay, f"Undid last SAM point. {count} point(s) remaining."
+        except Exception as e:
+            return sam_points, sam_labels_list, None, None, None, f"SAM undo error: {e}"
+
+    def clear_sam_points(image_path, rect_list, preset_mask):
+        """Clear SAM points and mask."""
+        if not image_path:
+            return [], [], None, None, None, "SAM points cleared."
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+            combined = composite_masks(
+                (img_w, img_h), rectangles=rect_list, preset_masks=preset_mask
+            )
+            overlay = create_mask_overlay(image_path, combined)
+            return [], [], None, combined, overlay, "SAM points cleared."
+        except:
+            return [], [], None, None, None, "SAM points cleared."
+
+    def run_inpaint_action(image_path, upscaled_img, resized_img, combined_mask, backend, prompt, neg_prompt,
+                           steps, guidance, strength):
+        """Run inpainting with selected backend. Uses best available source: upscaled > resized > original."""
+        if not image_path:
+            return None, None, "No image selected."
+        if combined_mask is None or np.array(combined_mask).max() == 0:
+            return None, None, "No mask defined. Add mask regions first."
+
+        try:
+            # Determine source image path: in-memory upscaled/resized > original on disk
+            processed_img = upscaled_img if upscaled_img is not None else resized_img
+            temp_path = None
+
+            if processed_img is not None:
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    if isinstance(processed_img, Image.Image):
+                        processed_img.save(tmp.name)
+                    elif isinstance(processed_img, np.ndarray):
+                        Image.fromarray(processed_img).save(tmp.name)
+                    temp_path = tmp.name
+                source_path = temp_path
+                source_info = "upscaled" if upscaled_img is not None else "resized"
+            else:
+                source_path = image_path
+                source_info = "original"
+
+            if "LaMa" in backend:
+                inpainter = get_lama_inpainter()
+                result = inpainter.inpaint(source_path, combined_mask)
+            else:
+                # SD backend
+                model_id = None
+                for display_name, mid in SDInpainter.MODELS.items():
+                    if display_name in backend:
+                        model_id = mid
+                        break
+                if model_id is None:
+                    if temp_path:
+                        os.unlink(temp_path)
+                    return None, None, f"Unknown backend: {backend}"
+
+                inpainter = get_sd_inpainter()
+                inpainter.load_model(model_id)
+                result = inpainter.inpaint(
+                    source_path, combined_mask,
+                    prompt=prompt,
+                    negative_prompt=neg_prompt,
+                    num_inference_steps=int(steps),
+                    guidance_scale=float(guidance),
+                    strength=float(strength),
+                )
+
+            if temp_path:
+                os.unlink(temp_path)
+
+            return result, result, f"Inpainting complete ({backend}, {source_info} image)."
+        except Exception as e:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+            err_msg = str(e).split('\n')[0][:200]
+            print(f"Inpaint Error: {e}")
+            return None, None, f"Inpaint Error: {err_msg}"
+
+    def save_inpainted_action(image_path, inpaint_result):
+        """Save inpainted image to output directory."""
+        if not image_path:
+            return "No image selected."
+        if inpaint_result is None:
+            return "No inpainted image. Run inpaint first."
+
+        try:
+            base_name = os.path.basename(image_path).rsplit('.', 1)[0]
+            dummy_path = global_state.get_output_path(image_path, ".txt")
+            base_dir = os.path.dirname(dummy_path)
+            save_path = os.path.join(base_dir, base_name + "_inpainted.jpg")
+
+            if isinstance(inpaint_result, np.ndarray):
+                inpaint_result = Image.fromarray(inpaint_result)
+            if inpaint_result.mode != "RGB":
+                inpaint_result = inpaint_result.convert("RGB")
+
+            inpaint_result.save(save_path, "JPEG", quality=98, optimize=True)
+            global_state.inpainted[image_path] = save_path
+
+            w, h = inpaint_result.size
+            file_size = os.path.getsize(save_path) / 1024
+            return f"Saved {base_name}_inpainted.jpg ({w}x{h}, {file_size:.0f} KB)"
+        except Exception as e:
+            return f"Save Error: {e}"
+
+
     def on_unload_all_models():
-        """Unload all models (segmenter and upscaler) to free VRAM."""
+        """Unload all models (segmenter, upscaler, SAM, LaMa, SD) to free VRAM."""
         try:
             seg = get_segmenter()
             seg.unload_model()
@@ -558,6 +1047,21 @@ def render_wizard():
         try:
             upscaler = get_upscaler()
             upscaler.unload_model()
+        except:
+            pass
+        try:
+            sam = get_sam_segmenter()
+            sam.unload_model()
+        except:
+            pass
+        try:
+            lama = get_lama_inpainter()
+            lama.unload_model()
+        except:
+            pass
+        try:
+            sd = get_sd_inpainter()
+            sd.unload_model()
         except:
             pass
         gc.collect()
@@ -1353,9 +1857,9 @@ def render_wizard():
                         # Tabs with context-sensitive toolbars
                         with gr.Tabs() as workbench_tabs:
                             # TAB 1: ORIGINAL
-                            with gr.TabItem("Original", id="tab_original"):
+                            with gr.TabItem("Resize", id="tab_original"):
                                 workbench_original = gr.Image(
-                                    label="Original Image",
+                                    show_label=False,
                                     type="pil",
                                     height=500,
                                     interactive=False
@@ -1376,7 +1880,7 @@ def render_wizard():
                             # TAB 2: UPSCALE
                             with gr.TabItem("Upscale", id="tab_upscale"):
                                 workbench_upscaled = gr.Image(
-                                    label="Upscaled Image",
+                                    show_label=False,
                                     type="pil",
                                     height=500,
                                     interactive=False
@@ -1400,13 +1904,119 @@ def render_wizard():
                                     info="Upscales then resizes shortest side to this."
                                 )
                                 with gr.Row():
-                                    run_upscale_btn = gr.Button("Run Upscale", variant="secondary")
+                                    save_original_from_upscale_btn = gr.Button("Save Original", variant="primary")
+                                    run_upscale_btn = gr.Button("Upscale", variant="secondary")
                                     save_upscale_btn = gr.Button("Save Upscale", variant="primary")
 
-                            # TAB 3: MASK
+                            # TAB 3: INPAINT
+                            with gr.TabItem("Inpaint", id="tab_inpaint"):
+                                # Hidden states for inpainting
+                                inpaint_mask_state = gr.State(None)
+                                rect_list_state = gr.State([])
+                                rect_first_click_state = gr.State(None)
+                                sam_points_state = gr.State([])
+                                sam_labels_state = gr.State([])
+                                sam_mask_state = gr.State(None)
+                                preset_mask_state = gr.State([])
+                                inpaint_result_state = gr.State(None)
+
+                                workbench_inpaint = gr.Image(
+                                    show_label=False,
+                                    type="pil",
+                                    height=500,
+                                    interactive=True,
+                                )
+
+                                inpaint_tool_state = gr.State("Manual Mask")
+                                with gr.Tabs() as inpaint_tool_tabs:
+                                    with gr.TabItem("Manual Mask", id="inpaint_tab_rect") as inpaint_tab_rect:
+                                        gr.Markdown("Click two points on the image to define a rectangle.")
+                                        with gr.Row():
+                                            undo_rect_btn = gr.Button("Undo Last", size="sm")
+                                            clear_rects_btn = gr.Button("Clear Rectangles", size="sm")
+
+                                    with gr.TabItem("SAM Click", id="inpaint_tab_sam") as inpaint_tab_sam:
+                                        gr.Markdown("Click on the image to segment objects.")
+                                        with gr.Row():
+                                            undo_sam_btn = gr.Button("Undo Last", size="sm")
+                                            clear_sam_btn = gr.Button("Clear SAM Points", size="sm")
+
+                                    with gr.TabItem("Watermark Preset", id="inpaint_tab_watermark") as inpaint_tab_watermark:
+                                        watermark_preset_dropdown = gr.Dropdown(
+                                            choices=[
+                                                "Bottom-Right Corner",
+                                                "Bottom-Center",
+                                                "Bottom Strip",
+                                                "Top-Left Corner",
+                                                "Top-Right Corner",
+                                                "Top Strip",
+                                            ],
+                                            value="Bottom-Right Corner",
+                                            label="Preset Region",
+                                        )
+                                        with gr.Row():
+                                            watermark_width_slider = gr.Slider(
+                                                label="Width %", minimum=5, maximum=50,
+                                                value=20, step=1,
+                                            )
+                                            watermark_height_slider = gr.Slider(
+                                                label="Height %", minimum=5, maximum=30,
+                                                value=10, step=1,
+                                            )
+                                        add_preset_btn = gr.Button("Add Preset Region", size="sm")
+                                        with gr.Row():
+                                            undo_preset_btn = gr.Button("Undo Last", size="sm")
+                                            clear_presets_btn = gr.Button("Clear Preset Regions", size="sm")
+
+                                    with gr.TabItem("Generate Inpaint", id="inpaint_tab_generate") as inpaint_tab_generate:
+                                        with gr.Accordion("🖥️ Model Information", open=False):
+                                            gr.Markdown("""
+- **LaMa (Fast):** ~2GB VRAM. Best for removing watermarks, text, and small artifacts. No prompt needed — fast and automatic.
+- **SD 1.5 Inpainting:** ~6GB VRAM. Prompt-guided inpainting for replacing masked areas with specific content. Good balance of quality and speed.
+- **SDXL Inpainting:** ~10GB VRAM. Highest quality prompt-guided inpainting. Requires 12GB+ GPU (RTX 3060 12GB / RTX 3090 / RTX 4090).
+""")
+                                        inpaint_backend = gr.Dropdown(
+                                            choices=[
+                                                "LaMa (Fast, ~2GB)",
+                                                "SD 1.5 Inpainting (~6GB)",
+                                                "SDXL Inpainting (~10GB)",
+                                            ],
+                                            value="LaMa (Fast, ~2GB)",
+                                            label="Inpainting Backend",
+                                        )
+                                        with gr.Column(visible=False) as sd_controls_col:
+                                            inpaint_prompt = gr.Textbox(
+                                                label="Prompt",
+                                                placeholder="Describe what should replace the masked area...",
+                                                max_lines=2,
+                                            )
+                                            with gr.Accordion("Advanced Settings", open=False):
+                                                inpaint_neg_prompt = gr.Textbox(
+                                                    label="Negative Prompt",
+                                                    placeholder="e.g., blurry, low quality, watermark",
+                                                    max_lines=2,
+                                                )
+                                                inpaint_steps = gr.Slider(
+                                                    label="Steps", minimum=10, maximum=50,
+                                                    value=30, step=1,
+                                                )
+                                                inpaint_guidance = gr.Slider(
+                                                    label="Guidance Scale", minimum=1.0, maximum=20.0,
+                                                    value=7.5, step=0.5,
+                                                )
+                                                inpaint_strength = gr.Slider(
+                                                    label="Strength", minimum=0.0, maximum=1.0,
+                                                    value=0.85, step=0.05,
+                                                )
+                                        with gr.Row():
+                                            run_inpaint_btn = gr.Button("Run Inpaint", variant="primary")
+                                            save_inpainted_btn = gr.Button("Save Inpaint", variant="primary")
+                                        inpaint_unload_btn = gr.Button("⏏ Unload All Models", variant="secondary")
+
+                            # TAB 4: MASK
                             with gr.TabItem("Mask", id="tab_mask"):
                                 workbench_mask = gr.Image(
-                                    label="Mask Preview",
+                                    show_label=False,
                                     type="pil",
                                     height=500,
                                     interactive=False
@@ -1417,13 +2027,13 @@ def render_wizard():
                                         value=False
                                     )
                                 with gr.Row():
-                                    create_mask_btn = gr.Button("Create Mask", variant="secondary")
+                                    create_mask_btn = gr.Button("Create Mask (BiRefNet)", variant="secondary")
                                     save_mask_btn = gr.Button("Save Mask", variant="primary")
 
-                            # TAB 4: TRANSPARENT
+                            # TAB 5: TRANSPARENT
                             with gr.TabItem("Transparent", id="tab_transparent"):
                                 workbench_transparent = gr.Image(
-                                    label="Transparent Preview",
+                                    show_label=False,
                                     type="pil",
                                     height=500,
                                     interactive=False
@@ -1440,6 +2050,7 @@ def render_wizard():
                                 with gr.Row():
                                     create_transparent_btn = gr.Button("Create Transparent", variant="secondary")
                                     save_transparent_btn = gr.Button("Save Transparent", variant="primary")
+
 
                 # Bulk Actions Accordion (at bottom, closed by default)
                 with gr.Accordion("Bulk Actions", open=False):
@@ -1715,25 +2326,40 @@ def render_wizard():
     # Navigation
     next_btn_1.click(lambda: gr.Tabs(selected=1), outputs=tabs)
 
-    # Step 2: Image Tools
-    tab_step_2.select(lambda: global_state.image_paths, outputs=step2_gallery)
+    # Step 2: Image Tools - shared output list for workbench updates
+    _step2_workbench_outputs = [
+        selected_path_state,
+        workbench_original,
+        workbench_status,
+        workbench_upscaled,
+        workbench_mask,
+        workbench_transparent,
+        upscaled_image_state,
+        resized_image_state,
+        mask_image_state,
+        transparent_image_state,
+        workbench_tabs,
+        workbench_inpaint,
+        rect_list_state,
+        rect_first_click_state,
+        inpaint_mask_state,
+        sam_points_state,
+        sam_labels_state,
+        sam_mask_state,
+        preset_mask_state,
+        inpaint_result_state,
+    ]
+
+    # Auto-select first image when Step 2 tab loads
+    tab_step_2.select(
+        auto_select_first_image,
+        outputs=[step2_gallery] + _step2_workbench_outputs,
+    )
 
     # Gallery selection - load image into all workbench tabs and reset to Original tab
     step2_gallery.select(
         on_gallery_select,
-        outputs=[
-            selected_path_state,       # path
-            workbench_original,        # original image display
-            workbench_status,          # unified status
-            workbench_upscaled,        # existing upscaled (if any)
-            workbench_mask,            # existing mask (if any)
-            workbench_transparent,     # existing transparent (if any)
-            upscaled_image_state,      # reset upscaled state
-            resized_image_state,       # reset resized state
-            mask_image_state,          # reset mask state
-            transparent_image_state,   # reset transparent state
-            workbench_tabs             # reset to Original tab
-        ]
+        outputs=_step2_workbench_outputs,
     )
 
     # TAB 1: Original - Save, Resize, and Save Resized buttons
@@ -1747,6 +2373,11 @@ def render_wizard():
         resize_action,
         inputs=[selected_path_state, resize_target_slider],
         outputs=[workbench_original, resized_image_state, workbench_status]
+    ).then(
+        propagate_source_to_tabs,
+        inputs=[upscaled_image_state, resized_image_state, mask_image_state,
+                transparent_image_state, inpaint_result_state, selected_path_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint],
     )
 
     save_resized_btn.click(
@@ -1760,11 +2391,21 @@ def render_wizard():
         upscale_action,
         inputs=[selected_path_state, upscaler_model, target_res_slider],
         outputs=[workbench_upscaled, upscaled_image_state, workbench_status]
+    ).then(
+        propagate_source_to_tabs,
+        inputs=[upscaled_image_state, resized_image_state, mask_image_state,
+                transparent_image_state, inpaint_result_state, selected_path_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint],
     )
 
     save_upscale_btn.click(
         save_upscale_action,
         inputs=[selected_path_state, workbench_upscaled],
+        outputs=workbench_status
+    )
+    save_original_from_upscale_btn.click(
+        save_original_action,
+        inputs=[selected_path_state, workbench_original],
         outputs=workbench_status
     )
 
@@ -1773,7 +2414,7 @@ def render_wizard():
     # TAB 3: Mask - Create and Save buttons (use upscaled_image_state for reliable full-res data)
     create_mask_btn.click(
         generate_mask_action,
-        inputs=[selected_path_state, upscaled_image_state, resized_image_state, invert_mask_check],
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state, inpaint_result_state, invert_mask_check],
         outputs=[workbench_mask, mask_image_state, workbench_status]
     )
 
@@ -1783,10 +2424,10 @@ def render_wizard():
         outputs=workbench_status
     )
 
-    # TAB 4: Transparent - Create and Save buttons (use upscaled_image_state for reliable full-res data)
+    # TAB 5: Transparent - Create and Save buttons
     create_transparent_btn.click(
         generate_transparent_action,
-        inputs=[selected_path_state, upscaled_image_state, resized_image_state, alpha_threshold_slider],
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state, inpaint_result_state, alpha_threshold_slider],
         outputs=[workbench_transparent, transparent_image_state, workbench_status]
     )
 
@@ -1794,6 +2435,166 @@ def render_wizard():
         save_transparent_action,
         inputs=[selected_path_state, workbench_transparent],
         outputs=workbench_status
+    )
+
+    # --- INPAINTING EVENT BINDINGS ---
+
+    # Toggle visibility of mask tool controls based on radio selection
+    # Track active inpaint tool tab
+    # Track active inpaint tool tab via individual TabItem.select() events
+    inpaint_tab_rect.select(lambda: "Manual Mask", outputs=inpaint_tool_state)
+    inpaint_tab_sam.select(lambda: "SAM Click", outputs=inpaint_tool_state)
+    inpaint_tab_watermark.select(lambda: "Watermark Preset", outputs=inpaint_tool_state)
+    inpaint_tab_generate.select(lambda: "Generate Inpaint", outputs=inpaint_tool_state)
+
+    # Toggle SD controls visibility based on backend selection
+    def toggle_sd_controls(backend):
+        is_sd = "SD" in backend or "SDXL" in backend
+        return gr.update(visible=is_sd)
+
+    inpaint_backend.change(
+        toggle_sd_controls,
+        inputs=inpaint_backend,
+        outputs=sd_controls_col,
+    )
+
+    # Image click handler: routes to Rectangle or SAM based on mode
+    def on_inpaint_image_click(image_path, tool_mode,
+                                first_click, rect_list, sam_points, sam_labels,
+                                sam_mask, preset_mask, evt: gr.SelectData):
+        """Handle click on the inpainting image canvas."""
+        if not image_path or evt is None:
+            return (first_click, rect_list, sam_points, sam_labels, sam_mask,
+                    None, None, "No image selected.")
+
+        x, y = evt.index
+
+        if tool_mode == "Manual Mask":
+            if first_click is None:
+                return (
+                    (x, y), rect_list, sam_points, sam_labels, sam_mask,
+                    None, gr.skip(), f"First corner at ({x}, {y}). Click second corner."
+                )
+            else:
+                x1, y1 = first_click
+                rx1, ry1 = min(x1, x), min(y1, y)
+                rx2, ry2 = max(x1, x), max(y1, y)
+                new_rect_list, new_mask, overlay, msg = add_rectangle_to_mask(
+                    image_path, rect_list, rx1, ry1, rx2, ry2, sam_mask
+                )
+                return (
+                    None, new_rect_list, sam_points, sam_labels, sam_mask,
+                    new_mask, overlay, msg
+                )
+
+        elif tool_mode == "SAM Click":
+            new_pts, new_labels, new_sam_mask, new_combined, overlay, msg = sam_click_action(
+                image_path, (x, y), sam_points, sam_labels, rect_list, preset_mask
+            )
+            return (
+                first_click, rect_list, new_pts, new_labels, new_sam_mask,
+                new_combined, overlay, msg
+            )
+
+        return (first_click, rect_list, sam_points, sam_labels, sam_mask,
+                None, gr.skip(), "Select a mask tool mode first.")
+
+    workbench_inpaint.select(
+        on_inpaint_image_click,
+        inputs=[selected_path_state, inpaint_tool_state,
+                rect_first_click_state, rect_list_state,
+                sam_points_state, sam_labels_state, sam_mask_state,
+                preset_mask_state],
+        outputs=[rect_first_click_state, rect_list_state,
+                 sam_points_state, sam_labels_state, sam_mask_state,
+                 inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # Rectangle: Undo last
+    undo_rect_btn.click(
+        undo_last_rectangle,
+        inputs=[selected_path_state, rect_list_state, sam_mask_state, preset_mask_state],
+        outputs=[rect_list_state, inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # Rectangle: Clear all rectangles
+    def clear_rects_only(image_path, sam_mask, preset_mask):
+        if not image_path:
+            return [], None, None, "Rectangles cleared."
+        try:
+            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(img)
+            img_w, img_h = img.size
+            combined = composite_masks((img_w, img_h), sam_mask=sam_mask, preset_masks=preset_mask)
+            overlay = create_mask_overlay(image_path, combined)
+            return [], combined, overlay, "Rectangles cleared."
+        except:
+            return [], None, None, "Rectangles cleared."
+
+    clear_rects_btn.click(
+        clear_rects_only,
+        inputs=[selected_path_state, sam_mask_state, preset_mask_state],
+        outputs=[rect_list_state, inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # SAM: Undo last point
+    undo_sam_btn.click(
+        undo_last_sam,
+        inputs=[selected_path_state, sam_points_state, sam_labels_state, rect_list_state, preset_mask_state],
+        outputs=[sam_points_state, sam_labels_state, sam_mask_state,
+                 inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # SAM: Clear points
+    clear_sam_btn.click(
+        clear_sam_points,
+        inputs=[selected_path_state, rect_list_state, preset_mask_state],
+        outputs=[sam_points_state, sam_labels_state, sam_mask_state,
+                 inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # Watermark preset: Add region
+    add_preset_btn.click(
+        add_watermark_preset,
+        inputs=[selected_path_state, watermark_preset_dropdown,
+                watermark_width_slider, watermark_height_slider,
+                rect_list_state, preset_mask_state, sam_mask_state],
+        outputs=[preset_mask_state, inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # Watermark preset: Undo last
+    undo_preset_btn.click(
+        undo_last_preset,
+        inputs=[selected_path_state, preset_mask_state, rect_list_state, sam_mask_state],
+        outputs=[preset_mask_state, inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+
+    # Watermark preset: Clear all
+    clear_presets_btn.click(
+        clear_preset_regions,
+        inputs=[selected_path_state, rect_list_state, sam_mask_state],
+        outputs=[preset_mask_state, inpaint_mask_state, workbench_inpaint, workbench_status],
+    )
+    # Run inpaint
+    run_inpaint_btn.click(
+        run_inpaint_action,
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state,
+                inpaint_mask_state, inpaint_backend,
+                inpaint_prompt, inpaint_neg_prompt, inpaint_steps,
+                inpaint_guidance, inpaint_strength],
+        outputs=[inpaint_result_state, workbench_inpaint, workbench_status],
+    ).then(
+        propagate_source_to_tabs,
+        inputs=[upscaled_image_state, resized_image_state, mask_image_state,
+                transparent_image_state, inpaint_result_state, selected_path_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint],
+    )
+
+    # Save inpainted
+    save_inpainted_btn.click(
+        save_inpainted_action,
+        inputs=[selected_path_state, inpaint_result_state],
+        outputs=workbench_status,
     )
 
     # Bulk operations
@@ -1806,8 +2607,9 @@ def render_wizard():
         outputs=bulk_status
     )
 
-    # Unload models (on Upscale tab)
+    # Unload models (on Upscale tab + Inpaint tab)
     unload_btn.click(on_unload_all_models, outputs=workbench_status)
+    inpaint_unload_btn.click(on_unload_all_models, outputs=workbench_status)
 
     def go_to_step3():
         """Navigate to Step 3 and refresh output gallery."""
@@ -1945,7 +2747,8 @@ def render_wizard():
             "Saved Captions": saved_captions,
             "Masks Created": len(global_state.masks),
             "Transparent Images": len(global_state.transparent),
-            "Upscaled Images": len(global_state.upscaled)
+            "Upscaled Images": len(global_state.upscaled),
+            "Inpainted Images": len(global_state.inpainted),
         }
 
     tab_step_4.select(get_stats, outputs=final_status)

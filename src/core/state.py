@@ -11,6 +11,7 @@ class ProjectState:
     masks: dict = field(default_factory=dict)  # path -> mask_path
     upscaled: dict = field(default_factory=dict)  # source_path -> output_path
     transparent: dict = field(default_factory=dict)  # source_path -> transparent_path
+    inpainted: dict = field(default_factory=dict)  # source_path -> inpainted_output_path
 
     def get_processing_status(self, image_path: str) -> dict:
         """Get processing status for an image."""
@@ -19,6 +20,7 @@ class ProjectState:
             "has_mask": image_path in self.masks,
             "has_transparent": image_path in self.transparent,
             "has_upscaled": image_path in self.upscaled,
+            "has_inpainted": image_path in self.inpainted,
         }
     
     def get_output_path(self, source_path: str, ext: str) -> str:

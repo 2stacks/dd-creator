@@ -21,4 +21,8 @@ dependencies = [
     "onnxruntime-gpu",
     "huggingface-hub",
     "spandrel>=0.3.0",
+    "simple-lama-inpainting",
+    "diffusers>=0.25.0",
+    "mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git",
+    "opencv-python-headless",
 ]

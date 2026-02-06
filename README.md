@@ -7,6 +7,9 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 ## Features
 
 - **Image Upscaling** - Real-ESRGAN upscaling via Spandrel for enhancing low-resolution source images
+- **Inpainting** - Remove watermarks, text, and artifacts with LaMa or Stable Diffusion inpainting
+  - Manual rectangle masks, MobileSAM click-to-segment, and watermark preset regions
+  - LaMa (fast, automatic), SD 1.5, or SDXL (prompt-guided) backends
 - **Background Removal** - BiRefNet-powered automatic mask generation and transparency
 - **Auto-Captioning** - Multiple model options:
   - Florence-2 (Base/Large) - Fast, detailed captions
@@ -39,6 +42,10 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 | WD14 ONNX | ~2GB |
 | BiRefNet | ~4GB |
 | Real-ESRGAN | ~2-4GB |
+| MobileSAM | ~1GB |
+| LaMa Inpainting | ~2GB |
+| SD 1.5 Inpainting | ~6GB |
+| SDXL Inpainting | ~10GB |
 
 ## Installation
 
@@ -64,7 +71,7 @@ Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directo
 The wizard guides you through 4 steps:
 
 1. **Project Setup** - Configure source data (local folder or browser upload) and workspace (new project or continue existing). Scans for existing caption files in both source and output directories so you can pick up where you left off.
-2. **Image Tools** - Per-image editing (upscale, masks, transparency) or bulk processing with smart resize/upscale routing
+2. **Image Tools** - Per-image editing (resize, upscale, inpaint, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Generate and edit captions with powerful tools:
    - Batch generation with prefix/suffix tags (trigger words, quality tags)
    - Automatic Danbooru rating tag filtering (optional, on by default)
@@ -85,7 +92,9 @@ dd-creator/
 │   │   ├── state.py       # Project state management
 │   │   ├── captioning.py  # VLM/tagger model wrappers
 │   │   ├── segmentation.py # BiRefNet background removal
-│   │   └── upscaling.py   # Real-ESRGAN upscaling
+│   │   ├── upscaling.py   # Real-ESRGAN upscaling
+│   │   ├── inpainting.py  # LaMa + SD inpainting backends
+│   │   └── sam_segmenter.py # MobileSAM click-to-segment
 │   └── ui/
 │       ├── wizard.py      # 4-step guided workflow
 │       └── dashboard.py   # Advanced tools (WIP)
