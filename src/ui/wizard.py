@@ -1321,7 +1321,7 @@ def render_wizard():
         """Process all images with conditional routing.
 
         Routes images based on shortest side dimension:
-        - < upscale_threshold: Upscale with Real-ESRGAN → Lanczos resize to target
+        - < upscale_threshold: Upscale with Spandrel → Lanczos resize to target
         - upscale_threshold to passthrough_max: Copy as JPG 98% (no resize)
         - > passthrough_max: Lanczos downscale to target
 
@@ -2261,7 +2261,7 @@ def render_wizard():
                         with gr.Group():
                             gr.Markdown("### Smart Processing (Resize / Upscale)")
                             gr.Markdown("""- **Passthrough** (between thresholds, saved as 98% JPG)
-- **Upscale** (below lower, Real-ESRGAN)
+- **Upscale** (below lower, Spandrel)
 - **Downscale** (above upper, Lanczos)""")
                             bulk_passthrough_max_slider = gr.Slider(
                                 label="Passthrough Upper Limit (px)",

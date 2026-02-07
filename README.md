@@ -6,7 +6,7 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 
 ## Features
 
-- **Image Upscaling** - Real-ESRGAN upscaling via Spandrel for enhancing low-resolution source images
+- **Image Upscaling** - Spandrel-based upscaling (supports ESRGAN, Real-ESRGAN, SwinIR, DAT, and more) for enhancing low-resolution source images
 - **Inpainting** - Remove watermarks, text, and artifacts with LaMa or Stable Diffusion inpainting
   - Manual rectangle masks, MobileSAM click-to-segment, and watermark preset regions
   - LaMa (fast, automatic), SD 1.5, or SDXL (prompt-guided) backends
@@ -24,9 +24,9 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 
 ## Screenshots
 
-| Import | Image Tools | Captioning |
-|--------|-------------|------------|
-| ![Import](assets/screenshot-import.png) | ![Tools](assets/screenshot-image-tools.png) | ![Captioning](assets/screenshot-captioning.png) |
+| Import | Image Tools | Captioning | Export |
+|--------|-------------|------------|--------|
+| ![Import](assets/screenshot-import.png) | ![Tools](assets/screenshot-image-tools.png) | ![Captioning](assets/screenshot-captioning.png) | ![Export](assets/screenshot-export.png) |
 
 ## Requirements
 
@@ -44,7 +44,7 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 | JoyCaption (8-bit) | ~12-16GB (requires 16GB+ GPU) |
 | WD14 ONNX | ~2GB |
 | BiRefNet | ~4GB |
-| Real-ESRGAN | ~2-4GB |
+| Spandrel Upscaler | ~2-4GB |
 | MobileSAM | ~1GB |
 | LaMa Inpainting | ~2GB |
 | SD 1.5 Inpainting | ~6GB |
@@ -65,7 +65,7 @@ Open your browser to `http://127.0.0.1:7860`
 
 ### Upscaler Models
 
-Place Real-ESRGAN `.pth` or `.safetensors` model files in the `models/` directory. Popular options:
+Place upscaler `.pth` or `.safetensors` model files in the `models/` directory. Popular options:
 - [RealESRGAN_x4plus](https://github.com/xinntao/Real-ESRGAN)
 - [4x-UltraSharp](https://openmodeldb.info/models/4x-UltraSharp)
 
@@ -95,7 +95,7 @@ dd-creator/
 │   │   ├── state.py       # Project state management
 │   │   ├── captioning.py  # VLM/tagger model wrappers
 │   │   ├── segmentation.py # BiRefNet background removal
-│   │   ├── upscaling.py   # Real-ESRGAN upscaling
+│   │   ├── upscaling.py   # Spandrel upscaling
 │   │   ├── inpainting.py  # LaMa + SD inpainting backends
 │   │   ├── sam_segmenter.py # MobileSAM click-to-segment
 │   │   ├── smart_crop.py  # Face-centric training crops

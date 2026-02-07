@@ -25,7 +25,7 @@ src/
     state.py              # ProjectState singleton - shared across all modules
     captioning.py         # ML model wrappers (Florence2, BLIP, JoyCaption, WD14 ONNX)
     segmentation.py       # BiRefNet background removal and mask generation
-    upscaling.py          # Real-ESRGAN/Spandrel upscaling with tiled processing
+    upscaling.py          # Spandrel upscaling with tiled processing
     inpainting.py         # LaMa + Stable Diffusion inpainting backends
     sam_segmenter.py      # MobileSAM click-to-segment for inpainting masks
     smart_crop.py         # Face-centric training crop generation
@@ -101,7 +101,7 @@ Two-column layout (40/60 split) with gallery height=700 and image viewer height=
 
 **Workbench (per-image editing, right column 60%):**
 - Resize tab: View/resize/save individual images
-- Upscale tab: Real-ESRGAN upscaling with model selector, Save Original / Upscale / Save Upscale buttons, "Unload All Models" button
+- Upscale tab: Spandrel upscaling with model selector, Save Original / Upscale / Save Upscale buttons, "Unload All Models" button
 - Inpaint tab: Mask creation + inpainting (see below)
 - Smart Crop tab: Face-centric training crops (see below)
 - Mask tab: `gr.Gallery` — Generate BiRefNet segmentation masks with invert option (processes all crops when available)
@@ -193,7 +193,7 @@ Gallery filtering tracks displayed images separately (`_displayed_images`) so se
 
 **Image Processing:**
 - BiRefNet segmentation: ~4GB VRAM
-- Real-ESRGAN upscaling: ~2-4GB VRAM (tiled processing for large images)
+- Spandrel upscaling: ~2-4GB VRAM (tiled processing for large images)
 - MobileSAM (click-to-segment): ~1GB VRAM (cached image embeddings)
 - LaMa inpainting: ~2GB VRAM (fast, no prompt needed)
 - SD 1.5 inpainting: ~6GB VRAM (prompt-guided)

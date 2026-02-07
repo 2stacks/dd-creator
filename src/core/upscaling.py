@@ -118,7 +118,7 @@ def process_image(
     """Process image with conditional routing based on shortest side.
 
     Routes images based on shortest side dimension:
-    - < upscale_threshold: Upscale with Real-ESRGAN, then Lanczos resize to target
+    - < upscale_threshold: Upscale with Spandrel, then Lanczos resize to target
     - upscale_threshold to passthrough_max: Copy as-is (passthrough)
     - > passthrough_max: Direct Lanczos downscale to target
 
