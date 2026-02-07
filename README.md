@@ -18,6 +18,7 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
   - BLIP (Base/Large) - Lightweight natural language captions
   - JoyCaption - High-quality descriptive captions (BF16 or 8-bit quantized)
   - WD14 Taggers (ONNX) - Booru-style tags via ViT, ConvNext, or SwinV2
+- **Export & Push to Hub** - Export to Kohya_ss, AI-Toolkit, OneTrainer, or HuggingFace formats, and push directly to the HuggingFace Hub
 - **Non-Destructive Workflow** - Separate input/output directories preserve originals
 - **Local Processing** - Runs entirely on your machine, no cloud dependencies
 
@@ -82,7 +83,7 @@ The wizard guides you through 4 steps:
    - Hygiene tools: fix formatting, deduplicate tags, undo changes
    - Bulk operations: add/remove tags, search & replace across all captions
    - Validation: ensures all images have saved captions before proceeding
-4. **Export** - Review session stats (output images, saved captions, masks, etc.) and finalize your dataset
+4. **Export** - Review session stats and export to Kohya_ss, AI-Toolkit, OneTrainer, or HuggingFace formats. Optionally push directly to the HuggingFace Hub
 
 ## Project Structure
 
@@ -97,7 +98,8 @@ dd-creator/
 │   │   ├── upscaling.py   # Real-ESRGAN upscaling
 │   │   ├── inpainting.py  # LaMa + SD inpainting backends
 │   │   ├── sam_segmenter.py # MobileSAM click-to-segment
-│   │   └── smart_crop.py  # Face-centric training crops
+│   │   ├── smart_crop.py  # Face-centric training crops
+│   │   └── export.py      # Export formats + HuggingFace Hub push
 │   └── ui/
 │       ├── wizard.py      # 4-step guided workflow
 │       └── dashboard.py   # Advanced tools (WIP)

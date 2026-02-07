@@ -146,9 +146,6 @@ cython_debug/
 # Gradio
 .gradio/
 
-# Hugging Face Cache
-.hf_cache/
-
 # AI Tool Configs
 .gemini/
 .claude/

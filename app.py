@@ -18,11 +18,6 @@ with gr.Blocks(title="Diffusion Dataset Creator") as app:
             render_dashboard()
 
 if __name__ == "__main__":
-    # Ensure cache directories are local and writable
-    os.environ["HF_HOME"] = os.path.join(os.getcwd(), ".hf_cache")
-    os.environ["TRANSFORMERS_CACHE"] = os.path.join(os.getcwd(), ".hf_cache")
-    os.makedirs(os.environ["HF_HOME"], exist_ok=True)
-
     # Allow access to the root directory so files from external drives/mnt are also accessible
     app.launch(
         server_name="0.0.0.0",

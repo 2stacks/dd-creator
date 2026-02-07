@@ -13,6 +13,7 @@ from src.core.upscaling import (
 )
 from src.core.sam_segmenter import get_sam_segmenter
 from src.core.inpainting import get_lama_inpainter, get_sd_inpainter, SDInpainter
+from src.core.export import export_kohya, export_ai_toolkit, export_onetrainer, export_huggingface, push_to_huggingface
 
 def render_wizard():
     # Ensure default directories exist for FileExplorer components
@@ -2486,10 +2487,194 @@ def render_wizard():
 
             # STEP 4: Export
             with gr.TabItem("Step 4: Export", id=3) as tab_step_4:
-                gr.Markdown("## Step 4: Project Finalized")
-                gr.Markdown("Your files have been saved alongside your images.")
-                final_status = gr.JSON(label="Current Session Stats")
-                refresh_btn = gr.Button("Refresh Stats")
+                gr.Markdown("## Step 4: Export Dataset")
+
+                with gr.Tabs():
+                    # AI-Toolkit tab
+                    with gr.TabItem("AI-Toolkit"):
+                        gr.Markdown("Export for [AI-Toolkit](https://github.com/ostris/ai-toolkit). "
+                                    "Replaces your trigger word with `[trigger]` in captions.")
+                        with gr.Accordion("About AI-Toolkit", open=False):
+                            gr.Markdown(
+                                "### AI-Toolkit by Ostris (The Flux Specialist)\n\n"
+                                "- **Best For:** Training Flux models. It is currently the "
+                                "\"gold standard\" for Flux LoRAs.\n"
+                                "- **Key Strength:** Speed & Optimization. It often implements the latest "
+                                "research (like specific Flux optimizers) before anyone else. It uses a "
+                                "configuration-based system (YAML files) rather than complex GUI tabs.\n"
+                                "- **Folder Requirement:** Flexible. It does not care about folder names. "
+                                "It relies on a `config.yaml` file to define repeats and trigger words.\n"
+                                "- **Weakness:** Less feature-rich for older models (SD 1.5) compared to Kohya."
+                            )
+                        aitk_trigger = gr.Textbox(label="Trigger Word", placeholder="e.g. ohwx, sks")
+                        aitk_prepend = gr.Checkbox(label="Prepend [trigger] if not found in caption", value=True)
+                        with gr.Accordion("Browse Export Directory", open=False):
+                            gr.Markdown("*Click any file to select its containing folder.*")
+                            aitk_explorer = gr.FileExplorer(
+                                root_dir="datasets/output",
+                                glob="**/*",
+                                file_count="single",
+                                height=250
+                            )
+                        aitk_export_dir = gr.Textbox(label="Export Directory")
+                        aitk_export_btn = gr.Button("Export", variant="primary")
+
+                    # Kohya_ss tab
+                    with gr.TabItem("Kohya_ss"):
+                        gr.Markdown("Export for [Kohya_ss](https://github.com/kohya-ss/sd-scripts). "
+                                    "Creates `img/<repeats>_<trigger>/` folder structure.")
+                        with gr.Accordion("About Kohya_ss", open=False):
+                            gr.Markdown(
+                                "### Kohya_ss (The Standard)\n\n"
+                                "- **Best For:** Users who need maximum compatibility and a \"battle-tested\" "
+                                "workflow. It is the industry standard for SD 1.5 and SDXL, with the widest "
+                                "community support.\n"
+                                "- **Key Strength:** Versatility. If a new feature drops, Kohya usually gets it "
+                                "quickly. It supports almost every model type (SD1.5, SDXL, Flux, Pony).\n"
+                                "- **Folder Requirement:** Strict. Requires the `Repeat_TriggerWord` naming "
+                                "convention (e.g., `10_cat`) to function correctly.\n"
+                                "- **Weakness:** The interface can be overwhelming with hundreds of settings. "
+                                "It is slower to adopt bleeding-edge research (like new optimizers) compared to Ostris."
+                            )
+                        kohya_trigger = gr.Textbox(label="Trigger Word", placeholder="e.g. ohwx, sks")
+                        kohya_steps = gr.Number(label="Target Steps per Epoch", value=200, precision=0, minimum=1)
+                        with gr.Accordion("Browse Export Directory", open=False):
+                            gr.Markdown("*Click any file to select its containing folder.*")
+                            kohya_explorer = gr.FileExplorer(
+                                root_dir="datasets/output",
+                                glob="**/*",
+                                file_count="single",
+                                height=250
+                            )
+                        kohya_export_dir = gr.Textbox(label="Export Directory")
+                        kohya_export_btn = gr.Button("Export", variant="primary")
+
+                    # OneTrainer tab
+                    with gr.TabItem("OneTrainer"):
+                        gr.Markdown("Export for [OneTrainer](https://github.com/Nerogar/OneTrainer). "
+                                    "Supports flat folder or Kohya-style directory structure.")
+                        with gr.Accordion("About OneTrainer", open=False):
+                            gr.Markdown(
+                                "### OneTrainer (The Power User / UI King)\n\n"
+                                "- **Best For:** Users who want a professional, desktop-app experience "
+                                "with real-time feedback.\n"
+                                "- **Key Strength:** Visual Feedback. It features a node-based graph view "
+                                "and a real-time dashboard that shows loss curves and generated samples "
+                                "during training, not just after.\n"
+                                "- **Folder Requirement:** Hybrid. It has its own \"Concept\" system but "
+                                "fully supports Kohya-style folder structures for backward compatibility.\n"
+                                "- **Weakness:** Development can sometimes pause due to developer burnout; "
+                                "it may lag behind on support for brand-new architectures (like the very "
+                                "first week of a new model release)."
+                            )
+                        ot_format = gr.Radio(
+                            choices=["Flat Folder", "Kohya-style"],
+                            value="Flat Folder",
+                            label="Format Mode"
+                        )
+                        with gr.Column(visible=False) as ot_kohya_options:
+                            ot_trigger = gr.Textbox(label="Trigger Word", placeholder="e.g. ohwx, sks")
+                            ot_steps = gr.Number(label="Target Steps per Epoch", value=200, precision=0, minimum=1)
+                        with gr.Accordion("Browse Export Directory", open=False):
+                            gr.Markdown("*Click any file to select its containing folder.*")
+                            ot_explorer = gr.FileExplorer(
+                                root_dir="datasets/output",
+                                glob="**/*",
+                                file_count="single",
+                                height=250
+                            )
+                        ot_export_dir = gr.Textbox(label="Export Directory")
+                        ot_export_btn = gr.Button("Export", variant="primary")
+
+                    # HuggingFace tab
+                    with gr.TabItem("HuggingFace"):
+                        gr.Markdown("Export for [HuggingFace](https://huggingface.co) datasets. "
+                                    "Creates a flat folder with images and a `metadata.jsonl` file.")
+                        with gr.Accordion("About HuggingFace", open=False):
+                            gr.Markdown(
+                                "### Hugging Face (The Cloud Standard)\n\n"
+                                "- **Best For:** Users who want to publish their datasets publicly, share them "
+                                "with a team, or use cloud-based training services that pull directly from "
+                                "Hugging Face.\n"
+                                "- **Key Strength:** Interoperability. The \"ImageFolder\" format is universally "
+                                "recognized by modern Python libraries (`datasets`, `diffusers`). Uploading this "
+                                "format automatically generates a web-based \"Dataset Viewer,\" allowing users to "
+                                "browse images and search captions without downloading the files.\n"
+                                "- **Folder Structure:** Flat & Simple. Unlike Kohya, it does not use subfolders "
+                                "for repeats. It requires a single flat folder containing all images and a "
+                                "`metadata.jsonl` file.\n"
+                                "- **Metadata Requirement:** The `metadata.jsonl` file must be a \"JSON Lines\" "
+                                "file where every line is a valid JSON object containing at least two keys:\n"
+                                "  - `file_name` — The exact filename of the image\n"
+                                "  - `text` — The caption or training prompt\n"
+                                "  - Example: `{\"file_name\": \"img_01.png\", \"text\": \"photo of a sks dog\"}`"
+                            )
+                        hf_caption_key = gr.Textbox(label="Caption Key", value="text",
+                                                     placeholder="JSONL key for captions")
+                        with gr.Accordion("Browse Export Directory", open=False):
+                            gr.Markdown("*Click any file to select its containing folder.*")
+                            hf_explorer = gr.FileExplorer(
+                                root_dir="datasets/output",
+                                glob="**/*",
+                                file_count="single",
+                                height=250
+                            )
+                        hf_export_dir = gr.Textbox(label="Export Directory")
+                        hf_export_btn = gr.Button("Export", variant="primary")
+
+                        with gr.Accordion("Push to HuggingFace Hub", open=False):
+                            gr.Markdown(
+                                "Push your exported dataset directly to the HuggingFace Hub. "
+                                "Requires a write token from [huggingface.co/settings/tokens]"
+                                "(https://huggingface.co/settings/tokens). "
+                                "If you've already logged in via `huggingface-cli login` or set "
+                                "`HF_TOKEN`, you can leave the token field blank."
+                            )
+                            hf_token = gr.Textbox(
+                                label="HF Token (optional if already logged in)",
+                                type="password",
+                                placeholder="hf_...",
+                            )
+                            hf_repo_name = gr.Textbox(label="Repository Name")
+                            hf_private = gr.Checkbox(label="Private Repository", value=True)
+                            hf_push_btn = gr.Button("Push to Hub", variant="primary")
+
+                with gr.Accordion("Training Method Guide", open=False):
+                    gr.Markdown(
+                        "### LoRA (Low-Rank Adaptation)\n\n"
+                        "- **What it is:** A small \"patch\" file (20MB \u2013 300MB) that sits on top of a "
+                        "base model. It does not change the original model.\n"
+                        "- **Best For:** Characters, specific styles, clothing, or objects.\n"
+                        "- **Pros:** Extremely lightweight; you can mix and match multiple LoRAs at once "
+                        "(e.g., \"Style LoRA\" + \"Character LoRA\"). Fast to train (15\u201330 mins).\n"
+                        "- **Cons:** Slightly less powerful than a full fine-tune for changing the entire "
+                        "understanding of a model.\n"
+                        "- **Dataset Size:** Small. 15\u201330 images is the sweet spot for a character. "
+                        "More than 50 often degrades quality unless the images are perfect.\n\n"
+                        "---\n\n"
+                        "### DreamBooth (Traditional)\n\n"
+                        "- **What it is:** A training technique that updates the entire model (6GB+) to "
+                        "learn a new subject, usually bound to a rare token (like `sks`).\n"
+                        "- **Best For:** Maximum fidelity when \"Good Enough\" isn't acceptable.\n"
+                        "- **Pros:** Theoretical 100% likeness capture. Better at learning difficult "
+                        "concepts that LoRA struggles with.\n"
+                        "- **Cons:** Creates a massive file (Checkpoints are 4GB\u201310GB). You cannot "
+                        "easily mix it with other concepts.\n"
+                        "- **Dataset Size:** Similar to LoRA (20\u201350 images), but creates a much "
+                        "larger output file.\n"
+                        "- **Current Status:** Largely obsolete for characters due to modern LoRA quality.\n\n"
+                        "---\n\n"
+                        "### Full Fine-Tune\n\n"
+                        "- **What it is:** Retraining the entire model's weights on a massive dataset.\n"
+                        "- **Best For:** Creating a completely new \"Base Model\" (e.g., Pony Diffusion, "
+                        "Juggernaut) or erasing concepts (like nudity or style) from a model.\n"
+                        "- **Pros:** Fundamental changes to how the model understands prompts and concepts.\n"
+                        "- **Cons:** Requires massive hardware (often 80GB+ VRAM or clusters). "
+                        "Extremely slow and expensive.\n"
+                        "- **Dataset Size:** Massive. Requires hundreds or thousands of images to be effective."
+                    )
+
+                export_status = gr.Textbox(label="Status", lines=3, interactive=False)
                 back_btn_4 = gr.Button("< Back")
 
     # --- EVENT BINDINGS (Wired at the end to ensure all components exist) ---
@@ -2962,21 +3147,129 @@ def render_wizard():
     next_btn_3.click(check_unsaved_captions, outputs=[tabs, save_status])
 
     # Step 4: Export
-    def get_stats():
+    def _get_stats_text():
         output_images, output_captions = get_output_images()
         saved_captions = sum(1 for c in output_captions.values() if c)
-        return {
-            "Source Images": len(global_state.image_paths),
-            "Output Images": len(output_images),
-            "Saved Captions": saved_captions,
-            "Masks Created": len(global_state.masks),
-            "Transparent Images": len(global_state.transparent),
-            "Upscaled Images": len(global_state.upscaled),
-            "Inpainted Images": len(global_state.inpainted),
-        }
+        parts = [
+            f"Source: {len(global_state.image_paths)}",
+            f"Output: {len(output_images)}",
+            f"Captions: {saved_captions}",
+            f"Masks: {len(global_state.masks)}",
+            f"Transparent: {len(global_state.transparent)}",
+            f"Upscaled: {len(global_state.upscaled)}",
+            f"Inpainted: {len(global_state.inpainted)}",
+        ]
+        return "Session — " + " | ".join(parts)
 
-    tab_step_4.select(get_stats, outputs=final_status)
-    refresh_btn.click(get_stats, outputs=final_status)
+    def _get_default_export_dir(format_name):
+        if global_state.output_directory:
+            return os.path.join(global_state.output_directory, "export", format_name)
+        return ""
+
+    def _get_default_trigger_word():
+        if global_state.output_directory:
+            return os.path.basename(global_state.output_directory.rstrip(os.sep))
+        return ""
+
+    def init_export_tab():
+        trigger = _get_default_trigger_word()
+        return (
+            _get_stats_text(),
+            trigger,
+            _get_default_export_dir("ai_toolkit"),
+            trigger,
+            _get_default_export_dir("kohya_ss"),
+            _get_default_export_dir("onetrainer"),
+            _get_default_export_dir("huggingface"),
+            trigger,  # hf_repo_name default
+        )
+
+    def run_kohya_export(trigger, steps, export_dir, progress=gr.Progress()):
+        if not global_state.output_directory:
+            return "No project loaded. Please complete Steps 1-3 first."
+        steps = int(steps) if steps else 200
+        def progress_cb(current, total, msg):
+            progress((current + 1) / total, desc=msg)
+        status, _ = export_kohya(global_state.output_directory, export_dir, trigger, steps, progress_cb)
+        return status
+
+    def run_aitk_export(trigger, prepend, export_dir, progress=gr.Progress()):
+        if not global_state.output_directory:
+            return "No project loaded. Please complete Steps 1-3 first."
+        def progress_cb(current, total, msg):
+            progress((current + 1) / total, desc=msg)
+        status, _ = export_ai_toolkit(global_state.output_directory, export_dir, trigger, prepend, progress_cb)
+        return status
+
+    def run_ot_export(format_mode, trigger, steps, export_dir, progress=gr.Progress()):
+        if not global_state.output_directory:
+            return "No project loaded. Please complete Steps 1-3 first."
+        mode = "kohya" if format_mode == "Kohya-style" else "flat"
+        steps = int(steps) if steps else 200
+        def progress_cb(current, total, msg):
+            progress((current + 1) / total, desc=msg)
+        status, _ = export_onetrainer(global_state.output_directory, export_dir, mode, trigger, steps, progress_cb)
+        return status
+
+    def run_hf_export(caption_key, export_dir, progress=gr.Progress()):
+        if not global_state.output_directory:
+            return "No project loaded. Please complete Steps 1-3 first."
+        def progress_cb(current, total, msg):
+            progress((current + 1) / total, desc=msg)
+        status, _ = export_huggingface(global_state.output_directory, export_dir, caption_key, progress_cb)
+        return status
+
+    def run_hf_push(token, repo_name, private, export_dir, progress=gr.Progress()):
+        if not global_state.output_directory:
+            return "No project loaded. Please complete Steps 1-3 first."
+        def progress_cb(msg):
+            progress(0, desc=msg)
+        status, _ = push_to_huggingface(export_dir, repo_name, token, private, progress_cb)
+        return status
+
+    tab_step_4.select(
+        init_export_tab,
+        outputs=[export_status, aitk_trigger, aitk_export_dir, kohya_trigger, kohya_export_dir, ot_export_dir, hf_export_dir, hf_repo_name]
+    )
+
+    # FileExplorer → Textbox updates for export directories
+    aitk_explorer.change(on_explorer_select, inputs=aitk_explorer, outputs=aitk_export_dir)
+    kohya_explorer.change(on_explorer_select, inputs=kohya_explorer, outputs=kohya_export_dir)
+    ot_explorer.change(on_explorer_select, inputs=ot_explorer, outputs=ot_export_dir)
+    hf_explorer.change(on_explorer_select, inputs=hf_explorer, outputs=hf_export_dir)
+
+    ot_format.change(
+        lambda mode: gr.Column(visible=(mode == "Kohya-style")),
+        inputs=ot_format,
+        outputs=ot_kohya_options,
+    )
+
+    kohya_export_btn.click(
+        run_kohya_export,
+        inputs=[kohya_trigger, kohya_steps, kohya_export_dir],
+        outputs=export_status,
+    )
+    aitk_export_btn.click(
+        run_aitk_export,
+        inputs=[aitk_trigger, aitk_prepend, aitk_export_dir],
+        outputs=export_status,
+    )
+    ot_export_btn.click(
+        run_ot_export,
+        inputs=[ot_format, ot_trigger, ot_steps, ot_export_dir],
+        outputs=export_status,
+    )
+    hf_export_btn.click(
+        run_hf_export,
+        inputs=[hf_caption_key, hf_export_dir],
+        outputs=export_status,
+    )
+    hf_push_btn.click(
+        run_hf_push,
+        inputs=[hf_token, hf_repo_name, hf_private, hf_export_dir],
+        outputs=export_status,
+    )
+
     back_btn_4.click(lambda: gr.Tabs(selected=2), outputs=tabs)
 
     return wizard_container

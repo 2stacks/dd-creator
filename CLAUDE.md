@@ -19,7 +19,7 @@ uv add <package_name>
 ## Architecture
 
 ```
-app.py                    # Entry point - Gradio interface setup, env config
+app.py                    # Entry point - Gradio interface setup
 src/
   core/
     state.py              # ProjectState singleton - shared across all modules
@@ -50,7 +50,7 @@ src/
 - Captions: `.txt` files (UTF-8) in output directory
 - Masks: Binary PNG files in output directory
 - Inpainted images: `<basename>_inpainted.jpg` (98% quality) in output directory
-- Model cache: `.hf_cache/` directory (auto-created, HuggingFace models)
+- Model cache: `~/.cache/huggingface/` (standard HuggingFace location, no local override)
 - Upscaler models: `models/` directory for user-provided `.pth`/`.safetensors` files
 - SAM checkpoint: `models/mobile_sam.pt` (auto-downloaded from HuggingFace)
 
@@ -168,6 +168,15 @@ Gallery filtering tracks displayed images separately (`_displayed_images`) so se
 - Session stats JSON display showing Source Images, Output Images, Saved Captions, Masks, Transparent Images, Upscaled Images, Inpainted Images
 - Stats are computed from actual output directory contents (not in-memory state) for accuracy
 - Refresh Stats button + Back navigation
+
+**HuggingFace tab — Push to Hub:**
+- Collapsible "Push to HuggingFace Hub" accordion inside the HuggingFace export tab
+- HF Token textbox (`type="password"`, optional if already logged in via `huggingface-cli login` or `HF_TOKEN` env var)
+- Repository Name textbox (auto-populated from project name on tab load)
+- Private Repository checkbox (default True)
+- Push to Hub button → calls `push_to_huggingface()` from `src/core/export.py`
+- Token resolution: explicit UI field → `huggingface_hub.get_token()` (env var → `~/.cache/huggingface/token`)
+- Token is never persisted by our code — only passed in-memory to `HfApi(token=...)`
 
 ## Gradio 6.0+ Specifics
 
