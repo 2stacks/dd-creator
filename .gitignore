@@ -152,8 +152,6 @@ cython_debug/
 
 # Project Specific
 *.log
-assets/*
-!assets/.gitkeep
 datasets/input/*
 !datasets/input/.gitkeep
 datasets/output/*
