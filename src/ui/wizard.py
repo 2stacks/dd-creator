@@ -233,7 +233,7 @@ def render_wizard():
 
     def _select_image_by_index(index):
         """Core logic for selecting an image by index in Step 2."""
-        if index < len(global_state.image_paths):
+        if global_state.image_paths and 0 <= index < len(global_state.image_paths):
             path = global_state.image_paths[index]
             # Load original image
             try:
@@ -328,9 +328,6 @@ def render_wizard():
     def auto_select_first_image():
         """Auto-select first image when Step 2 tab loads."""
         gallery_data = global_state.image_paths
-        if not gallery_data:
-            result = _select_image_by_index(-1)  # triggers the empty fallback
-            return (gallery_data,) + result
         result = _select_image_by_index(0)
         return (gallery_data,) + result
 
