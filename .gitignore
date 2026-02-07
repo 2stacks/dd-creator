@@ -164,6 +164,5 @@ datasets/output/*
 temp/
 
 # Model weights
-.models/*.pth
-.models/*.safetensors
+.models/*
 !.models/.gitkeep

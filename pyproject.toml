@@ -25,4 +25,5 @@ dependencies = [
     "diffusers>=0.25.0",
     "mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git",
     "opencv-python-headless",
+    "mediapipe",
 ]

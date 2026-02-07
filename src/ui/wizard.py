@@ -282,8 +282,13 @@ def render_wizard():
             # For mask/transparent: inpainted > upscaled > original
             best_for_downstream = existing_inpainted if existing_inpainted is not None else best_source
             upscale_display = best_source
-            mask_display = existing_mask if existing_mask is not None else best_for_downstream
-            transparent_display = existing_transparent if existing_transparent is not None else best_for_downstream
+            # Gallery-format displays for mask/transparent
+            mask_display = [(existing_mask, "mask")] if existing_mask is not None else (
+                [(best_for_downstream, "original")] if best_for_downstream is not None else None
+            )
+            transparent_display = [(existing_transparent, "transparent")] if existing_transparent is not None else (
+                [(best_for_downstream, "original")] if best_for_downstream is not None else None
+            )
             inpaint_display = existing_inpainted if existing_inpainted is not None else best_source
             return (
                 path,                    # selected_path_state
@@ -307,10 +312,14 @@ def render_wizard():
                 None,                    # sam_mask_state
                 [],                      # preset_mask_state
                 None,                    # inpaint_result_state
+                # Smart crop resets
+                None,                    # smart_crop_results_state
+                [(best_for_downstream, "original")],  # smart_crop_gallery (best available)
             )
         return (None, None, "Select an image from the library.", None, None, None, None, None, None, None,
                 gr.Tabs(selected="tab_original"),
-                None, [], None, None, [], [], None, [], None)
+                None, [], None, None, [], [], None, [], None,
+                None, None)
 
     def on_gallery_select(evt: gr.SelectData):
         """Handle gallery selection in Step 2."""
@@ -349,29 +358,51 @@ def render_wizard():
         except Exception as e:
             return None, None, f"Upscale Error: {e}"
 
-    def generate_mask_action(image_path, upscaled_img, resized_img, inpaint_result, invert_mask):
-        """Generate mask from best available image. Priority: inpainted > upscaled > resized > original."""
+    def _segment_single_image(seg, source_img, image_path, invert_mask):
+        """Segment a single image and return the mask. Helper for generate_mask_action."""
+        import tempfile
+        if source_img is not None:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                if isinstance(source_img, Image.Image):
+                    source_img.save(tmp.name)
+                elif isinstance(source_img, np.ndarray):
+                    Image.fromarray(source_img).save(tmp.name)
+                temp_path = tmp.name
+            mask = seg.segment(temp_path)
+            os.unlink(temp_path)
+        elif image_path in global_state.upscaled:
+            mask = seg.segment(global_state.upscaled[image_path])
+        else:
+            mask = seg.segment(image_path)
+        if invert_mask and mask:
+            mask = ImageOps.invert(mask.convert("L")).convert("RGB")
+        return mask
+
+    def generate_mask_action(image_path, upscaled_img, resized_img, inpaint_result, invert_mask, smart_crop_results):
+        """Generate mask from best available image or from smart crop results.
+        Priority: inpainted > upscaled > resized > original."""
         if not image_path:
             return None, None, "No image selected."
 
         try:
             seg = get_segmenter()
 
-            # Priority: inpaint result > in-memory upscaled > in-memory resized > saved upscaled on disk > original
+            # If smart crops exist, process each crop
+            if smart_crop_results:
+                gallery_data = []
+                state_data = []
+                for label, crop_img in smart_crop_results:
+                    mask = _segment_single_image(seg, crop_img, image_path, invert_mask)
+                    if mask:
+                        gallery_data.append((mask, f"{label}_mask"))
+                        state_data.append((f"{label}_mask", mask))
+                count = len(gallery_data)
+                return gallery_data, state_data, f"Mask generated for {count} crop(s). Click 'Save Mask' to save."
+
+            # Single image processing
             processed_img = inpaint_result if inpaint_result is not None else (upscaled_img if upscaled_img is not None else resized_img)
 
             if processed_img is not None:
-                # Save processed image to temp file for segmenter
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    if isinstance(processed_img, Image.Image):
-                        processed_img.save(tmp.name)
-                    elif isinstance(processed_img, np.ndarray):
-                        Image.fromarray(processed_img).save(tmp.name)
-                    temp_path = tmp.name
-
-                mask = seg.segment(temp_path)
-                os.unlink(temp_path)
                 if inpaint_result is not None:
                     source_info = "inpainted image"
                 elif upscaled_img is not None:
@@ -379,44 +410,61 @@ def render_wizard():
                 else:
                     source_info = "resized image"
             elif image_path in global_state.upscaled:
-                mask = seg.segment(global_state.upscaled[image_path])
                 source_info = "saved upscaled image"
             else:
-                mask = seg.segment(image_path)
                 source_info = "original image"
 
-            if invert_mask and mask:
-                # Invert the mask (white becomes black, black becomes white)
-                mask = ImageOps.invert(mask.convert("L")).convert("RGB")
-
+            mask = _segment_single_image(seg, processed_img, image_path, invert_mask)
             mask_w, mask_h = mask.size if mask else (0, 0)
-            return mask, mask, f"Mask generated from {source_info} ({mask_w}x{mask_h}px). Click 'Save Mask' to save."
+            gallery_data = [(mask, "mask")] if mask else None
+            state_data = [("mask", mask)] if mask else None
+            return gallery_data, state_data, f"Mask generated from {source_info} ({mask_w}x{mask_h}px). Click 'Save Mask' to save."
         except Exception as e:
             return None, None, f"Mask Error: {e}"
 
-    def generate_transparent_action(image_path, upscaled_img, resized_img, inpaint_result, alpha_threshold):
-        """Generate transparent image from best available image. Priority: inpainted > upscaled > resized > original."""
+    def _segment_single_transparent(seg, source_img, image_path):
+        """Segment a single image and return transparent version. Helper for generate_transparent_action."""
+        import tempfile
+        if source_img is not None:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                if isinstance(source_img, Image.Image):
+                    source_img.save(tmp.name)
+                elif isinstance(source_img, np.ndarray):
+                    Image.fromarray(source_img).save(tmp.name)
+                temp_path = tmp.name
+            transparent = seg.segment(temp_path, return_transparent=True)
+            os.unlink(temp_path)
+        elif image_path in global_state.upscaled:
+            transparent = seg.segment(global_state.upscaled[image_path], return_transparent=True)
+        else:
+            transparent = seg.segment(image_path, return_transparent=True)
+        return transparent
+
+    def generate_transparent_action(image_path, upscaled_img, resized_img, inpaint_result, alpha_threshold, smart_crop_results):
+        """Generate transparent image from best available image or from smart crop results.
+        Priority: inpainted > upscaled > resized > original."""
         if not image_path:
             return None, None, "No image selected."
 
         try:
             seg = get_segmenter()
 
-            # Priority: inpaint result > in-memory upscaled > in-memory resized > saved upscaled on disk > original
+            # If smart crops exist, process each crop
+            if smart_crop_results:
+                gallery_data = []
+                state_data = []
+                for label, crop_img in smart_crop_results:
+                    transparent = _segment_single_transparent(seg, crop_img, image_path)
+                    if transparent:
+                        gallery_data.append((transparent, f"{label}_transparent"))
+                        state_data.append((f"{label}_transparent", transparent))
+                count = len(gallery_data)
+                return gallery_data, state_data, f"Transparent generated for {count} crop(s). Click 'Save Transparent' to save."
+
+            # Single image processing
             processed_img = inpaint_result if inpaint_result is not None else (upscaled_img if upscaled_img is not None else resized_img)
 
             if processed_img is not None:
-                # Save processed image to temp file for segmenter
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    if isinstance(processed_img, Image.Image):
-                        processed_img.save(tmp.name)
-                    elif isinstance(processed_img, np.ndarray):
-                        Image.fromarray(processed_img).save(tmp.name)
-                    temp_path = tmp.name
-
-                transparent = seg.segment(temp_path, return_transparent=True)
-                os.unlink(temp_path)
                 if inpaint_result is not None:
                     source_info = "inpainted image"
                 elif upscaled_img is not None:
@@ -424,14 +472,15 @@ def render_wizard():
                 else:
                     source_info = "resized image"
             elif image_path in global_state.upscaled:
-                transparent = seg.segment(global_state.upscaled[image_path], return_transparent=True)
                 source_info = "saved upscaled image"
             else:
-                transparent = seg.segment(image_path, return_transparent=True)
                 source_info = "original image"
 
+            transparent = _segment_single_transparent(seg, processed_img, image_path)
             t_w, t_h = transparent.size if transparent else (0, 0)
-            return transparent, transparent, f"Transparent generated from {source_info} ({t_w}x{t_h}px). Click 'Save Transparent' to save."
+            gallery_data = [(transparent, "transparent")] if transparent else None
+            state_data = [("transparent", transparent)] if transparent else None
+            return gallery_data, state_data, f"Transparent generated from {source_info} ({t_w}x{t_h}px). Click 'Save Transparent' to save."
         except Exception as e:
             return None, None, f"Transparent Error: {e}"
 
@@ -463,10 +512,10 @@ def render_wizard():
         except Exception as e:
             return f"Save Error: {e}"
 
-    def propagate_source_to_tabs(upscaled_img, resized_img, mask_img, transparent_img, inpaint_result, image_path):
-        """Update mask/transparent/inpaint previews with best available source image.
+    def propagate_source_to_tabs(upscaled_img, resized_img, mask_img, transparent_img, inpaint_result, image_path, smart_crop_results):
+        """Update mask/transparent/inpaint/smart-crop previews with best available source image.
         Only updates tabs that don't already have generated output.
-        Priority for mask/transparent: inpaint result > upscaled > resized > original
+        Priority for mask/transparent/smart-crop: inpaint result > upscaled > resized > original
         Priority for inpaint: upscaled > resized > original"""
         base_best = upscaled_img if upscaled_img is not None else resized_img
         if base_best is None and image_path:
@@ -475,12 +524,34 @@ def render_wizard():
                 base_best = ImageOps.exif_transpose(base_best)
             except:
                 pass
-        # Mask/transparent should use inpainted image if available (workflow: inpaint then mask/transparent)
+        # Mask/transparent/smart-crop should use inpainted image if available
         best_for_downstream = inpaint_result if inpaint_result is not None else base_best
-        mask_out = mask_img if mask_img is not None else best_for_downstream
-        transparent_out = transparent_img if transparent_img is not None else best_for_downstream
         inpaint_out = inpaint_result if inpaint_result is not None else base_best
-        return mask_out, transparent_out, inpaint_out
+        # Smart crop: show best available preview unless crops already generated
+        if smart_crop_results:
+            smart_crop_out = gr.skip()
+        else:
+            preview = best_for_downstream if best_for_downstream is not None else base_best
+            smart_crop_out = [(preview, "original")] if preview is not None else None
+        # Mask/transparent galleries: show crops if available, else single best source
+        # Note: mask_img/transparent_img are state lists [(label, img), ...] from generate actions
+        if smart_crop_results and mask_img is None:
+            mask_out = [(crop_img, label) for label, crop_img in smart_crop_results]
+        elif mask_img is not None:
+            mask_out = [(img, label) for label, img in mask_img]
+        elif best_for_downstream is not None:
+            mask_out = [(best_for_downstream, "original")]
+        else:
+            mask_out = None
+        if smart_crop_results and transparent_img is None:
+            transparent_out = [(crop_img, label) for label, crop_img in smart_crop_results]
+        elif transparent_img is not None:
+            transparent_out = [(img, label) for label, img in transparent_img]
+        elif best_for_downstream is not None:
+            transparent_out = [(best_for_downstream, "original")]
+        else:
+            transparent_out = None
+        return mask_out, transparent_out, inpaint_out, smart_crop_out
 
     def resize_action(image_path, target_short_side):
         """Resize image to target shortest side (preview only, doesn't save)."""
@@ -554,11 +625,12 @@ def render_wizard():
         except Exception as e:
             return f"Save Error: {e}"
 
-    def save_mask_action(image_path, mask_img):
-        """Save the mask as grayscale PNG to the masks/ subdirectory."""
+    def save_mask_action(image_path, mask_state):
+        """Save mask(s) as grayscale PNG to the masks/ subdirectory.
+        mask_state is a list of (label, mask_img) tuples."""
         if not image_path:
             return "No image selected."
-        if mask_img is None:
+        if not mask_state:
             return "No mask. Create mask first."
 
         try:
@@ -567,54 +639,108 @@ def render_wizard():
             base_dir = os.path.dirname(dummy_path)
             masks_dir = os.path.join(base_dir, "masks")
             os.makedirs(masks_dir, exist_ok=True)
-            save_path = os.path.join(masks_dir, base_name + "_mask.png")
 
-            if isinstance(mask_img, np.ndarray):
-                mask_img = Image.fromarray(mask_img)
+            saved = []
+            for label, mask_img in mask_state:
+                if isinstance(mask_img, np.ndarray):
+                    mask_img = Image.fromarray(mask_img)
+                if mask_img.mode != "L":
+                    mask_img = mask_img.convert("L")
 
-            # Convert to grayscale "L" mode for smaller file size
-            if mask_img.mode != "L":
-                mask_img = mask_img.convert("L")
+                # Single mask uses backward-compatible filename
+                if label == "mask":
+                    filename = base_name + "_mask.png"
+                else:
+                    filename = f"{base_name}_{label}.png"
+                save_path = os.path.join(masks_dir, filename)
+                mask_img.save(save_path, "PNG", optimize=True)
+                saved.append(filename)
 
-            mask_img.save(save_path, "PNG", optimize=True)
+                # Track first/only mask in global state for backward compat
+                if label == "mask" or len(mask_state) == 1:
+                    global_state.masks[image_path] = save_path
 
-            global_state.masks[image_path] = save_path
-            w, h = mask_img.size
-            file_size = os.path.getsize(save_path) / 1024
-            return f"Saved {base_name}_mask.png ({w}x{h}, {file_size:.0f} KB)"
+            return f"Saved {len(saved)} mask(s): {', '.join(saved)}"
         except Exception as e:
             return f"Save Error: {e}"
 
-    def save_transparent_action(image_path, transparent_img):
-        """Save the transparent image as PNG to the output directory."""
+    def save_transparent_action(image_path, transparent_state):
+        """Save transparent image(s) as PNG to the output directory.
+        transparent_state is a list of (label, transparent_img) tuples."""
         if not image_path:
             return "No image selected."
-        if transparent_img is None:
+        if not transparent_state:
             return "No transparent image. Create transparent first."
 
         try:
             base_name = os.path.basename(image_path).rsplit('.', 1)[0]
             dummy_path = global_state.get_output_path(image_path, ".txt")
             base_dir = os.path.dirname(dummy_path)
-            save_path = os.path.join(base_dir, base_name + "_transparent.png")
 
-            if isinstance(transparent_img, np.ndarray):
-                transparent_img = Image.fromarray(transparent_img)
+            saved = []
+            for label, transparent_img in transparent_state:
+                if isinstance(transparent_img, np.ndarray):
+                    transparent_img = Image.fromarray(transparent_img)
+                if transparent_img.mode != "RGBA":
+                    transparent_img = transparent_img.convert("RGBA")
 
-            # Ensure RGBA mode for transparency
-            if transparent_img.mode != "RGBA":
-                transparent_img = transparent_img.convert("RGBA")
+                # Single transparent uses backward-compatible filename
+                if label == "transparent":
+                    filename = base_name + "_transparent.png"
+                else:
+                    filename = f"{base_name}_{label}.png"
+                save_path = os.path.join(base_dir, filename)
+                transparent_img.save(save_path, "PNG", optimize=True)
+                saved.append(filename)
 
-            # Save as PNG for universal transparency support
-            transparent_img.save(save_path, "PNG", optimize=True)
+                # Track first/only transparent in global state for backward compat
+                if label == "transparent" or len(transparent_state) == 1:
+                    global_state.transparent[image_path] = save_path
 
-            global_state.transparent[image_path] = save_path
-            w, h = transparent_img.size
-            file_size = os.path.getsize(save_path) / 1024
-            return f"Saved {base_name}_transparent.png ({w}x{h}, {file_size:.0f} KB)"
+            return f"Saved {len(saved)} transparent(s): {', '.join(saved)}"
         except Exception as e:
             return f"Save Error: {e}"
 
+
+    # --- SMART CROP HELPERS ---
+
+    def run_smart_crop_action(image_path, min_resolution, upscaled_img, resized_img, inpaint_result):
+        """Run face-centric smart crop on the best available source image.
+        Priority: inpainted > upscaled > resized > original."""
+        if not image_path:
+            return None, None, "No image selected."
+        try:
+            from src.core.smart_crop import process_training_image
+            # Use best available source (same priority as mask/transparent tabs)
+            img = inpaint_result or upscaled_img or resized_img
+            if img is None:
+                img = Image.open(image_path).convert("RGB")
+                img = ImageOps.exif_transpose(img)
+            else:
+                img = img.convert("RGB")
+            results = process_training_image(img, int(min_resolution))
+            gallery_data = [(crop_img, label) for label, crop_img in results]
+            count = len(results)
+            labels = ", ".join(label for label, _ in results)
+            return gallery_data, results, f"Smart Crop: {count} crop(s) generated ({labels})"
+        except Exception as e:
+            return None, None, f"Smart Crop Error: {e}"
+
+    def save_smart_crop_action(image_path, results):
+        """Save all generated crops to the output directory."""
+        if not image_path:
+            return "No image selected."
+        if not results:
+            return "No crops to save. Run Smart Crop first."
+        try:
+            saved = []
+            for label, crop_img in results:
+                out_path = global_state.get_output_path(image_path, f"_{label}.jpg")
+                crop_img.save(out_path, "JPEG", quality=98)
+                saved.append(os.path.basename(out_path))
+            return f"Saved {len(saved)} crop(s): {', '.join(saved)}"
+        except Exception as e:
+            return f"Save Error: {e}"
 
     # --- INPAINTING HELPERS ---
 
@@ -659,18 +785,38 @@ def render_wizard():
 
         return mask
 
-    def create_mask_overlay(image_path, mask):
-        """Create a red-tinted overlay showing masked areas on the original image.
+    def _get_inpaint_source(image_path, upscaled_img=None, resized_img=None, inpaint_result=None):
+        """Return the best available source image for inpaint mask operations.
+        Priority: inpaint result > upscaled > resized > original from disk."""
+        for candidate in (inpaint_result, upscaled_img, resized_img):
+            if candidate is not None:
+                if isinstance(candidate, Image.Image):
+                    return candidate.convert("RGB")
+                return Image.fromarray(candidate).convert("RGB")
+        if image_path:
+            try:
+                img = Image.open(image_path).convert("RGB")
+                return ImageOps.exif_transpose(img)
+            except:
+                pass
+        return None
+
+    def create_mask_overlay(image_path, mask, source_img=None):
+        """Create a red-tinted overlay showing masked areas on the source image.
 
         Args:
-            image_path: Path to original image
+            image_path: Path to original image (fallback)
             mask: PIL Image mode 'L', white=areas to inpaint
+            source_img: Best available source PIL Image (optional)
 
         Returns:
             PIL Image (RGB) with red overlay
         """
-        img = Image.open(image_path).convert("RGB")
-        img = ImageOps.exif_transpose(img)
+        if source_img is not None:
+            img = source_img.convert("RGB") if isinstance(source_img, Image.Image) else Image.fromarray(source_img).convert("RGB")
+        else:
+            img = Image.open(image_path).convert("RGB")
+            img = ImageOps.exif_transpose(img)
 
         if mask is None or np.array(mask).max() == 0:
             return img
@@ -735,13 +881,16 @@ def render_wizard():
         draw.rectangle([x1, y1, x2, y2], fill=255)
         return mask
 
-    def add_rectangle_to_mask(image_path, rect_list, x1, y1, x2, y2, sam_mask):
+    def add_rectangle_to_mask(image_path, rect_list, x1, y1, x2, y2, sam_mask, source_img=None):
         """Add a rectangle to the mask and return updated overlay."""
         if not image_path:
             return rect_list, None, None, "No image selected."
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
+            if source_img is not None:
+                img = source_img if isinstance(source_img, Image.Image) else Image.fromarray(source_img)
+            else:
+                img = Image.open(image_path)
+                img = ImageOps.exif_transpose(img)
             img_w, img_h = img.size
         except Exception as e:
             return rect_list, None, None, f"Error: {e}"
@@ -760,12 +909,13 @@ def render_wizard():
         rect_list = rect_list + [(rx1, ry1, rx2, ry2)]
 
         combined = composite_masks((img_w, img_h), rectangles=rect_list, sam_mask=sam_mask)
-        overlay = create_mask_overlay(image_path, combined)
+        overlay = create_mask_overlay(image_path, combined, source_img=img)
         count = len(rect_list)
         sam_info = " + SAM region" if sam_mask is not None else ""
         return rect_list, combined, overlay, f"{count} rectangle(s){sam_info}"
 
-    def undo_last_rectangle(image_path, rect_list, sam_mask, preset_mask):
+    def undo_last_rectangle(image_path, rect_list, sam_mask, preset_mask,
+                            upscaled_img=None, resized_img=None, inpaint_result=None):
         """Remove last rectangle from list."""
         if not rect_list:
             return rect_list, None, None, "No rectangles to undo."
@@ -776,39 +926,37 @@ def render_wizard():
             return rect_list, None, None, "No image selected."
 
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
         except:
             return rect_list, None, None, "Error loading image."
 
         combined = composite_masks((img_w, img_h), rectangles=rect_list, sam_mask=sam_mask, preset_masks=preset_mask)
-        overlay = create_mask_overlay(image_path, combined)
+        overlay = create_mask_overlay(image_path, combined, source_img=source)
         return rect_list, combined, overlay, f"{len(rect_list)} rectangle(s)"
 
-    def clear_all_masks(image_path):
+    def clear_all_masks(image_path, upscaled_img=None, resized_img=None, inpaint_result=None):
         """Clear all mask data and return clean image."""
         if not image_path:
             return [], None, None, None, None, "No image selected."
         try:
-            img = Image.open(image_path).convert("RGB")
-            img = ImageOps.exif_transpose(img)
+            img = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
             return [], None, None, None, img, "All masks cleared."
         except:
             return [], None, None, None, None, "Error loading image."
 
 
     def add_watermark_preset(image_path, preset_name, width_pct, height_pct,
-                             rect_list, preset_list, sam_mask):
+                             rect_list, preset_list, sam_mask,
+                             upscaled_img=None, resized_img=None, inpaint_result=None):
         """Add a watermark preset region to the mask."""
         if preset_list is None:
             preset_list = []
         if not image_path:
             return preset_list, None, None, "No image selected."
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
         except Exception as e:
             return preset_list, None, None, f"Error: {e}"
 
@@ -820,43 +968,44 @@ def render_wizard():
             sam_mask=sam_mask,
             preset_masks=new_list
         )
-        overlay = create_mask_overlay(image_path, combined)
+        overlay = create_mask_overlay(image_path, combined, source_img=source)
         count = len(new_list)
         return new_list, combined, overlay, f"Added {preset_name} preset. {count} preset region(s)."
 
-    def undo_last_preset(image_path, preset_list, rect_list, sam_mask):
+    def undo_last_preset(image_path, preset_list, rect_list, sam_mask,
+                         upscaled_img=None, resized_img=None, inpaint_result=None):
         """Remove last watermark preset region."""
         if not preset_list:
             return preset_list, None, None, "No preset regions to undo."
         new_list = preset_list[:-1]
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
             combined = composite_masks(
                 (img_w, img_h), rectangles=rect_list, sam_mask=sam_mask, preset_masks=new_list
             )
-            overlay = create_mask_overlay(image_path, combined)
+            overlay = create_mask_overlay(image_path, combined, source_img=source)
             count = len(new_list)
             return new_list, combined, overlay, f"Undid last preset. {count} preset region(s) remaining."
         except Exception as e:
             return new_list, None, None, f"Preset undo error: {e}"
 
-    def clear_preset_regions(image_path, rect_list, sam_mask):
+    def clear_preset_regions(image_path, rect_list, sam_mask,
+                             upscaled_img=None, resized_img=None, inpaint_result=None):
         """Clear all watermark preset regions."""
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
             combined = composite_masks(
                 (img_w, img_h), rectangles=rect_list, sam_mask=sam_mask
             )
-            overlay = create_mask_overlay(image_path, combined)
+            overlay = create_mask_overlay(image_path, combined, source_img=source)
             return [], combined, overlay, "All preset regions cleared."
         except:
             return [], None, None, "All preset regions cleared."
 
-    def sam_click_action(image_path, evt_index, sam_points, sam_labels_list, rect_list, preset_mask):
+    def sam_click_action(image_path, evt_index, sam_points, sam_labels_list, rect_list, preset_mask,
+                         upscaled_img=None, resized_img=None, inpaint_result=None):
         """Handle SAM click on image for segmentation."""
         if not image_path:
             return sam_points, sam_labels_list, None, None, None, "No image selected."
@@ -875,13 +1024,20 @@ def render_wizard():
 
         try:
             sam = get_sam_segmenter()
-            points_arr = [(px, py) for px, py in sam_points]
-            labels_arr = sam_labels_list
-            sam_mask = sam.segment_multi_point(image_path, points_arr, labels_arr)
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
 
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            # SAM needs a file path — save source to temp file if not original
+            if upscaled_img is not None or resized_img is not None or inpaint_result is not None:
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    source.save(tmp.name)
+                    sam_source_path = tmp.name
+                sam_mask = sam.segment_multi_point(sam_source_path, [(px, py) for px, py in sam_points], sam_labels_list)
+                os.unlink(sam_source_path)
+            else:
+                sam_mask = sam.segment_multi_point(image_path, [(px, py) for px, py in sam_points], sam_labels_list)
+
+            img_w, img_h = source.size
 
             combined = composite_masks(
                 (img_w, img_h),
@@ -889,7 +1045,7 @@ def render_wizard():
                 sam_mask=sam_mask,
                 preset_masks=preset_mask
             )
-            overlay = create_mask_overlay(image_path, combined)
+            overlay = create_mask_overlay(image_path, combined, source_img=source)
 
             fg_count = sum(1 for l in sam_labels_list if l == 1)
             bg_count = sum(1 for l in sam_labels_list if l == 0)
@@ -899,7 +1055,8 @@ def render_wizard():
         except Exception as e:
             return sam_points, sam_labels_list, None, None, None, f"SAM Error: {e}"
 
-    def undo_last_sam(image_path, sam_points, sam_labels_list, rect_list, preset_mask):
+    def undo_last_sam(image_path, sam_points, sam_labels_list, rect_list, preset_mask,
+                      upscaled_img=None, resized_img=None, inpaint_result=None):
         """Remove last SAM point and recompute mask."""
         if not sam_points:
             return sam_points, sam_labels_list, None, None, None, "No SAM points to undo."
@@ -908,36 +1065,44 @@ def render_wizard():
         sam_labels_list = sam_labels_list[:-1]
 
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
 
             sam_mask = None
             if sam_points:
                 sam = get_sam_segmenter()
-                sam_mask = sam.segment_multi_point(image_path, sam_points, sam_labels_list)
+                # SAM needs a file path — save source to temp if not original
+                if upscaled_img is not None or resized_img is not None or inpaint_result is not None:
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        source.save(tmp.name)
+                        sam_source_path = tmp.name
+                    sam_mask = sam.segment_multi_point(sam_source_path, sam_points, sam_labels_list)
+                    os.unlink(sam_source_path)
+                else:
+                    sam_mask = sam.segment_multi_point(image_path, sam_points, sam_labels_list)
 
             combined = composite_masks(
                 (img_w, img_h), rectangles=rect_list, sam_mask=sam_mask, preset_masks=preset_mask
             )
-            overlay = create_mask_overlay(image_path, combined)
+            overlay = create_mask_overlay(image_path, combined, source_img=source)
             count = len(sam_points)
             return sam_points, sam_labels_list, sam_mask, combined, overlay, f"Undid last SAM point. {count} point(s) remaining."
         except Exception as e:
             return sam_points, sam_labels_list, None, None, None, f"SAM undo error: {e}"
 
-    def clear_sam_points(image_path, rect_list, preset_mask):
+    def clear_sam_points(image_path, rect_list, preset_mask,
+                         upscaled_img=None, resized_img=None, inpaint_result=None):
         """Clear SAM points and mask."""
         if not image_path:
             return [], [], None, None, None, "SAM points cleared."
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
             combined = composite_masks(
                 (img_w, img_h), rectangles=rect_list, preset_masks=preset_mask
             )
-            overlay = create_mask_overlay(image_path, combined)
+            overlay = create_mask_overlay(image_path, combined, source_img=source)
             return [], [], None, combined, overlay, "SAM points cleared."
         except:
             return [], [], None, None, None, "SAM points cleared."
@@ -1819,8 +1984,9 @@ def render_wizard():
                     scan_output = gr.Textbox(
                         show_label=False,
                         interactive=False,
-                        lines=3,
-                        placeholder="Ready to scan..."
+                        lines=2,
+                        max_lines=2,
+                        placeholder="Ready to scan...",
                     )
 
                 next_btn_1 = gr.Button("Next >", interactive=False)
@@ -1849,7 +2015,9 @@ def render_wizard():
                         workbench_status = gr.Textbox(
                             label="Status",
                             value="Select an image from the library.",
-                            interactive=False
+                            interactive=False,
+                            lines=2,
+                            max_lines=2,
                         )
 
                     # COLUMN 2: THE WORKBENCH (60%)
@@ -1861,7 +2029,7 @@ def render_wizard():
                                 workbench_original = gr.Image(
                                     show_label=False,
                                     type="pil",
-                                    height=500,
+                                    height=700,
                                     interactive=False
                                 )
                                 resize_target_slider = gr.Slider(
@@ -1882,7 +2050,7 @@ def render_wizard():
                                 workbench_upscaled = gr.Image(
                                     show_label=False,
                                     type="pil",
-                                    height=500,
+                                    height=700,
                                     interactive=False
                                 )
                                 with gr.Row():
@@ -1923,8 +2091,8 @@ def render_wizard():
                                 workbench_inpaint = gr.Image(
                                     show_label=False,
                                     type="pil",
-                                    height=500,
-                                    interactive=True,
+                                    height=700,
+                                    interactive=False,
                                 )
 
                                 inpaint_tool_state = gr.State("Manual Mask")
@@ -2013,13 +2181,36 @@ def render_wizard():
                                             save_inpainted_btn = gr.Button("Save Inpaint", variant="primary")
                                         inpaint_unload_btn = gr.Button("⏏ Unload All Models", variant="secondary")
 
-                            # TAB 4: MASK
-                            with gr.TabItem("Mask", id="tab_mask"):
-                                workbench_mask = gr.Image(
+                            # TAB 4: SMART CROP
+                            with gr.TabItem("Smart Crop", id="tab_smart_crop"):
+                                smart_crop_gallery = gr.Gallery(
                                     show_label=False,
-                                    type="pil",
-                                    height=500,
-                                    interactive=False
+                                    columns=3,
+                                    height=700,
+                                    allow_preview=True,
+                                    preview=True,
+                                )
+                                smart_crop_min_res_slider = gr.Slider(
+                                    label="Minimum Crop Resolution (px)",
+                                    minimum=256,
+                                    maximum=1024,
+                                    value=512,
+                                    step=64,
+                                    info="Crops smaller than this are discarded"
+                                )
+                                with gr.Row():
+                                    run_smart_crop_btn = gr.Button("Run Smart Crop", variant="secondary")
+                                    save_smart_crop_btn = gr.Button("Save All Crops", variant="primary")
+                                smart_crop_results_state = gr.State(None)
+
+                            # TAB 5: MASK
+                            with gr.TabItem("Mask", id="tab_mask"):
+                                workbench_mask = gr.Gallery(
+                                    show_label=False,
+                                    columns=3,
+                                    height=700,
+                                    allow_preview=True,
+                                    preview=True,
                                 )
                                 with gr.Row():
                                     invert_mask_check = gr.Checkbox(
@@ -2030,13 +2221,14 @@ def render_wizard():
                                     create_mask_btn = gr.Button("Create Mask (BiRefNet)", variant="secondary")
                                     save_mask_btn = gr.Button("Save Mask", variant="primary")
 
-                            # TAB 5: TRANSPARENT
+                            # TAB 6: TRANSPARENT
                             with gr.TabItem("Transparent", id="tab_transparent"):
-                                workbench_transparent = gr.Image(
+                                workbench_transparent = gr.Gallery(
                                     show_label=False,
-                                    type="pil",
-                                    height=500,
-                                    interactive=False
+                                    columns=3,
+                                    height=700,
+                                    allow_preview=True,
+                                    preview=True,
                                 )
                                 with gr.Row():
                                     alpha_threshold_slider = gr.Slider(
@@ -2199,7 +2391,9 @@ def render_wizard():
                         save_status = gr.Textbox(
                             label="Status",
                             value="Select an image from the gallery.",
-                            interactive=False
+                            interactive=False,
+                            lines=2,
+                            max_lines=2,
                         )
 
                     # RIGHT COLUMN: Editor (60%)
@@ -2348,6 +2542,8 @@ def render_wizard():
         sam_mask_state,
         preset_mask_state,
         inpaint_result_state,
+        smart_crop_results_state,
+        smart_crop_gallery,
     ]
 
     # Auto-select first image when Step 2 tab loads
@@ -2376,8 +2572,8 @@ def render_wizard():
     ).then(
         propagate_source_to_tabs,
         inputs=[upscaled_image_state, resized_image_state, mask_image_state,
-                transparent_image_state, inpaint_result_state, selected_path_state],
-        outputs=[workbench_mask, workbench_transparent, workbench_inpaint],
+                transparent_image_state, inpaint_result_state, selected_path_state, smart_crop_results_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint, smart_crop_gallery],
     )
 
     save_resized_btn.click(
@@ -2394,8 +2590,8 @@ def render_wizard():
     ).then(
         propagate_source_to_tabs,
         inputs=[upscaled_image_state, resized_image_state, mask_image_state,
-                transparent_image_state, inpaint_result_state, selected_path_state],
-        outputs=[workbench_mask, workbench_transparent, workbench_inpaint],
+                transparent_image_state, inpaint_result_state, selected_path_state, smart_crop_results_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint, smart_crop_gallery],
     )
 
     save_upscale_btn.click(
@@ -2411,29 +2607,50 @@ def render_wizard():
 
     refresh_models_btn.click(refresh_upscaler_models, outputs=upscaler_model)
 
-    # TAB 3: Mask - Create and Save buttons (use upscaled_image_state for reliable full-res data)
+    # TAB 4: Smart Crop - Run and Save buttons
+    run_smart_crop_btn.click(
+        run_smart_crop_action,
+        inputs=[selected_path_state, smart_crop_min_res_slider,
+                upscaled_image_state, resized_image_state, inpaint_result_state],
+        outputs=[smart_crop_gallery, smart_crop_results_state, workbench_status]
+    ).then(
+        propagate_source_to_tabs,
+        inputs=[upscaled_image_state, resized_image_state, mask_image_state,
+                transparent_image_state, inpaint_result_state, selected_path_state, smart_crop_results_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint, smart_crop_gallery],
+    )
+
+    save_smart_crop_btn.click(
+        save_smart_crop_action,
+        inputs=[selected_path_state, smart_crop_results_state],
+        outputs=workbench_status
+    )
+
+    # TAB 5: Mask - Create and Save buttons
     create_mask_btn.click(
         generate_mask_action,
-        inputs=[selected_path_state, upscaled_image_state, resized_image_state, inpaint_result_state, invert_mask_check],
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state,
+                inpaint_result_state, invert_mask_check, smart_crop_results_state],
         outputs=[workbench_mask, mask_image_state, workbench_status]
     )
 
     save_mask_btn.click(
         save_mask_action,
-        inputs=[selected_path_state, workbench_mask],
+        inputs=[selected_path_state, mask_image_state],
         outputs=workbench_status
     )
 
-    # TAB 5: Transparent - Create and Save buttons
+    # TAB 6: Transparent - Create and Save buttons
     create_transparent_btn.click(
         generate_transparent_action,
-        inputs=[selected_path_state, upscaled_image_state, resized_image_state, inpaint_result_state, alpha_threshold_slider],
+        inputs=[selected_path_state, upscaled_image_state, resized_image_state,
+                inpaint_result_state, alpha_threshold_slider, smart_crop_results_state],
         outputs=[workbench_transparent, transparent_image_state, workbench_status]
     )
 
     save_transparent_btn.click(
         save_transparent_action,
-        inputs=[selected_path_state, workbench_transparent],
+        inputs=[selected_path_state, transparent_image_state],
         outputs=workbench_status
     )
 
@@ -2461,13 +2678,16 @@ def render_wizard():
     # Image click handler: routes to Rectangle or SAM based on mode
     def on_inpaint_image_click(image_path, tool_mode,
                                 first_click, rect_list, sam_points, sam_labels,
-                                sam_mask, preset_mask, evt: gr.SelectData):
+                                sam_mask, preset_mask,
+                                upscaled_img, resized_img, inpaint_result,
+                                evt: gr.SelectData):
         """Handle click on the inpainting image canvas."""
         if not image_path or evt is None:
             return (first_click, rect_list, sam_points, sam_labels, sam_mask,
-                    None, None, "No image selected.")
+                    None, gr.skip(), "No image selected.")
 
         x, y = evt.index
+        source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
 
         if tool_mode == "Manual Mask":
             if first_click is None:
@@ -2480,20 +2700,21 @@ def render_wizard():
                 rx1, ry1 = min(x1, x), min(y1, y)
                 rx2, ry2 = max(x1, x), max(y1, y)
                 new_rect_list, new_mask, overlay, msg = add_rectangle_to_mask(
-                    image_path, rect_list, rx1, ry1, rx2, ry2, sam_mask
+                    image_path, rect_list, rx1, ry1, rx2, ry2, sam_mask, source_img=source
                 )
                 return (
                     None, new_rect_list, sam_points, sam_labels, sam_mask,
-                    new_mask, overlay, msg
+                    new_mask, overlay if overlay is not None else gr.skip(), msg
                 )
 
         elif tool_mode == "SAM Click":
             new_pts, new_labels, new_sam_mask, new_combined, overlay, msg = sam_click_action(
-                image_path, (x, y), sam_points, sam_labels, rect_list, preset_mask
+                image_path, (x, y), sam_points, sam_labels, rect_list, preset_mask,
+                upscaled_img=upscaled_img, resized_img=resized_img, inpaint_result=inpaint_result
             )
             return (
                 first_click, rect_list, new_pts, new_labels, new_sam_mask,
-                new_combined, overlay, msg
+                new_combined, overlay if overlay is not None else gr.skip(), msg
             )
 
         return (first_click, rect_list, sam_points, sam_labels, sam_mask,
@@ -2504,43 +2725,48 @@ def render_wizard():
         inputs=[selected_path_state, inpaint_tool_state,
                 rect_first_click_state, rect_list_state,
                 sam_points_state, sam_labels_state, sam_mask_state,
-                preset_mask_state],
+                preset_mask_state,
+                upscaled_image_state, resized_image_state, inpaint_result_state],
         outputs=[rect_first_click_state, rect_list_state,
                  sam_points_state, sam_labels_state, sam_mask_state,
                  inpaint_mask_state, workbench_inpaint, workbench_status],
     )
 
+    # Shorthand for the three source states used by all inpaint mask handlers
+    _inpaint_src_states = [upscaled_image_state, resized_image_state, inpaint_result_state]
+
     # Rectangle: Undo last
     undo_rect_btn.click(
         undo_last_rectangle,
-        inputs=[selected_path_state, rect_list_state, sam_mask_state, preset_mask_state],
+        inputs=[selected_path_state, rect_list_state, sam_mask_state, preset_mask_state] + _inpaint_src_states,
         outputs=[rect_list_state, inpaint_mask_state, workbench_inpaint, workbench_status],
     )
 
     # Rectangle: Clear all rectangles
-    def clear_rects_only(image_path, sam_mask, preset_mask):
+    def clear_rects_only(image_path, sam_mask, preset_mask,
+                         upscaled_img=None, resized_img=None, inpaint_result=None):
         if not image_path:
             return [], None, None, "Rectangles cleared."
         try:
-            img = Image.open(image_path)
-            img = ImageOps.exif_transpose(img)
-            img_w, img_h = img.size
+            source = _get_inpaint_source(image_path, upscaled_img, resized_img, inpaint_result)
+            img_w, img_h = source.size
             combined = composite_masks((img_w, img_h), sam_mask=sam_mask, preset_masks=preset_mask)
-            overlay = create_mask_overlay(image_path, combined)
+            overlay = create_mask_overlay(image_path, combined, source_img=source)
             return [], combined, overlay, "Rectangles cleared."
         except:
             return [], None, None, "Rectangles cleared."
 
     clear_rects_btn.click(
         clear_rects_only,
-        inputs=[selected_path_state, sam_mask_state, preset_mask_state],
+        inputs=[selected_path_state, sam_mask_state, preset_mask_state] + _inpaint_src_states,
         outputs=[rect_list_state, inpaint_mask_state, workbench_inpaint, workbench_status],
     )
 
     # SAM: Undo last point
     undo_sam_btn.click(
         undo_last_sam,
-        inputs=[selected_path_state, sam_points_state, sam_labels_state, rect_list_state, preset_mask_state],
+        inputs=[selected_path_state, sam_points_state, sam_labels_state,
+                rect_list_state, preset_mask_state] + _inpaint_src_states,
         outputs=[sam_points_state, sam_labels_state, sam_mask_state,
                  inpaint_mask_state, workbench_inpaint, workbench_status],
     )
@@ -2548,7 +2774,7 @@ def render_wizard():
     # SAM: Clear points
     clear_sam_btn.click(
         clear_sam_points,
-        inputs=[selected_path_state, rect_list_state, preset_mask_state],
+        inputs=[selected_path_state, rect_list_state, preset_mask_state] + _inpaint_src_states,
         outputs=[sam_points_state, sam_labels_state, sam_mask_state,
                  inpaint_mask_state, workbench_inpaint, workbench_status],
     )
@@ -2558,21 +2784,22 @@ def render_wizard():
         add_watermark_preset,
         inputs=[selected_path_state, watermark_preset_dropdown,
                 watermark_width_slider, watermark_height_slider,
-                rect_list_state, preset_mask_state, sam_mask_state],
+                rect_list_state, preset_mask_state, sam_mask_state] + _inpaint_src_states,
         outputs=[preset_mask_state, inpaint_mask_state, workbench_inpaint, workbench_status],
     )
 
     # Watermark preset: Undo last
     undo_preset_btn.click(
         undo_last_preset,
-        inputs=[selected_path_state, preset_mask_state, rect_list_state, sam_mask_state],
+        inputs=[selected_path_state, preset_mask_state, rect_list_state,
+                sam_mask_state] + _inpaint_src_states,
         outputs=[preset_mask_state, inpaint_mask_state, workbench_inpaint, workbench_status],
     )
 
     # Watermark preset: Clear all
     clear_presets_btn.click(
         clear_preset_regions,
-        inputs=[selected_path_state, rect_list_state, sam_mask_state],
+        inputs=[selected_path_state, rect_list_state, sam_mask_state] + _inpaint_src_states,
         outputs=[preset_mask_state, inpaint_mask_state, workbench_inpaint, workbench_status],
     )
     # Run inpaint
@@ -2586,8 +2813,8 @@ def render_wizard():
     ).then(
         propagate_source_to_tabs,
         inputs=[upscaled_image_state, resized_image_state, mask_image_state,
-                transparent_image_state, inpaint_result_state, selected_path_state],
-        outputs=[workbench_mask, workbench_transparent, workbench_inpaint],
+                transparent_image_state, inpaint_result_state, selected_path_state, smart_crop_results_state],
+        outputs=[workbench_mask, workbench_transparent, workbench_inpaint, smart_crop_gallery],
     )
 
     # Save inpainted

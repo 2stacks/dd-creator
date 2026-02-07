@@ -28,6 +28,7 @@ src/
     upscaling.py          # Real-ESRGAN/Spandrel upscaling with tiled processing
     inpainting.py         # LaMa + Stable Diffusion inpainting backends
     sam_segmenter.py      # MobileSAM click-to-segment for inpainting masks
+    smart_crop.py         # Face-centric training crop generation
     birefnet_impl/        # Local BiRefNet model implementation (avoids trust_remote_code)
   ui/
     wizard.py             # 4-step guided workflow (Import → Image Tools → Captioning → Export)
@@ -92,16 +93,17 @@ Two-column layout with tabbed sections for source data and workspace configurati
 
 ## Step 2: Image Tools UI Structure
 
-Two-column layout (40/60 split) with gallery height=700 and image viewer height=500. Image previews use `show_label=False` — tabs provide context.
+Two-column layout (40/60 split) with gallery height=700 and image viewer height=700. Image previews use `show_label=False` — tabs provide context.
 
-**Left column (40%):** Image gallery + unified Status textbox below gallery. All workbench actions across all tabs output status messages to this single status bar. First image auto-selects when Step 2 loads.
+**Left column (40%):** Image gallery + unified Status textbox (2 lines, scrollable) below gallery. All workbench actions across all tabs output status messages to this single status bar. First image auto-selects when Step 2 loads.
 
 **Workbench (per-image editing, right column 60%):**
 - Resize tab: View/resize/save individual images
 - Upscale tab: Real-ESRGAN upscaling with model selector, Save Original / Upscale / Save Upscale buttons, "Unload All Models" button
 - Inpaint tab: Mask creation + inpainting (see below)
-- Mask tab: Generate BiRefNet segmentation masks with invert option
-- Transparent tab: Remove backgrounds with alpha threshold
+- Smart Crop tab: Face-centric training crops (see below)
+- Mask tab: `gr.Gallery` — Generate BiRefNet segmentation masks with invert option (processes all crops when available)
+- Transparent tab: `gr.Gallery` — Remove backgrounds with alpha threshold (processes all crops when available)
 
 **Inpaint tab sub-tabs:**
 - Manual Mask: Click two points to draw rectangle mask regions (undo/clear)
@@ -109,11 +111,15 @@ Two-column layout (40/60 split) with gallery height=700 and image viewer height=
 - Watermark Preset: Quick rectangle masks for common watermark positions with width/height % sliders (add/undo/clear)
 - Generate Inpaint: Backend selector (LaMa/SD 1.5/SDXL), prompt (SD only), advanced settings accordion (negative prompt, steps, guidance, strength), Run Inpaint / Save Inpaint buttons, Unload All Models button, Model Information accordion
 
-**Image source priority chain:** Mask, Transparent, and Inpaint tabs use the best available source image. Priority: inpainted > upscaled > resized > original. When resize, upscale, or inpaint completes, downstream tab previews update automatically via `.then()` chains.
+**Image source priority chain:** All downstream tabs use the best available source image via `_get_inpaint_source()`. Priority: inpainted > upscaled > resized > original. When resize, upscale, inpaint, or smart crop completes, downstream tab previews update automatically via `.then()` chains.
+
+**Inpaint source consistency:** All inpaint mask functions (rectangles, SAM, watermarks, overlays) receive `upscaled_image_state`, `resized_image_state`, and `inpaint_result_state` as inputs and use `_get_inpaint_source()` to get the correct image dimensions. This ensures click coordinates match the displayed image, not the original file on disk. The `workbench_inpaint` component uses `interactive=False` — `.select()` events still capture click coordinates without the upload/edit UI interfering.
 
 **Inpaint tool state tracking:** Each sub-tab uses `TabItem.select()` to update an `inpaint_tool_state` (`gr.State`). The image click handler routes to Manual Mask or SAM Click based on this state.
 
 **Mask compositing:** All inpaint mask sources (rectangles, SAM mask, watermark presets) are combined via binary OR in `composite_masks()`. A red overlay preview is generated server-side with `create_mask_overlay()`. Preset masks are stored as a list for undo support.
+
+**Smart Crop → Mask/Transparent pipeline:** When smart crop results exist, the Mask and Transparent galleries show crop images as previews. Generating masks or transparents processes all crops through BiRefNet, producing gallery results with per-crop labels. Save functions use `{basename}_{crop_label}_mask.png` / `{basename}_{crop_label}_transparent.png` filenames for crops, or backward-compatible `{basename}_mask.png` / `{basename}_transparent.png` for single images. State format: `[(label, img), ...]` for save functions, `[(img, label), ...]` for gallery display.
 
 **Bulk Actions accordion (batch processing):**
 - Left column: Smart Processing (passthrough/upscale/downscale routing by image size)

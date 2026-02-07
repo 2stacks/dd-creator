@@ -10,7 +10,9 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 - **Inpainting** - Remove watermarks, text, and artifacts with LaMa or Stable Diffusion inpainting
   - Manual rectangle masks, MobileSAM click-to-segment, and watermark preset regions
   - LaMa (fast, automatic), SD 1.5, or SDXL (prompt-guided) backends
+- **Smart Crop** - Face-centric training crops (face_focus, upper_body, full_body) with automatic face detection
 - **Background Removal** - BiRefNet-powered automatic mask generation and transparency
+  - Processes individual images or all smart crops in batch
 - **Auto-Captioning** - Multiple model options:
   - Florence-2 (Base/Large) - Fast, detailed captions
   - BLIP (Base/Large) - Lightweight natural language captions
@@ -71,7 +73,7 @@ Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directo
 The wizard guides you through 4 steps:
 
 1. **Project Setup** - Configure source data (local folder or browser upload) and workspace (new project or continue existing). Scans for existing caption files in both source and output directories so you can pick up where you left off.
-2. **Image Tools** - Per-image editing (resize, upscale, inpaint, masks, transparency) or bulk processing with smart resize/upscale routing
+2. **Image Tools** - Per-image editing (resize, upscale, inpaint, smart crop, masks, transparency) or bulk processing with smart resize/upscale routing
 3. **Captioning** - Generate and edit captions with powerful tools:
    - Batch generation with prefix/suffix tags (trigger words, quality tags)
    - Automatic Danbooru rating tag filtering (optional, on by default)
@@ -94,7 +96,8 @@ dd-creator/
 │   │   ├── segmentation.py # BiRefNet background removal
 │   │   ├── upscaling.py   # Real-ESRGAN upscaling
 │   │   ├── inpainting.py  # LaMa + SD inpainting backends
-│   │   └── sam_segmenter.py # MobileSAM click-to-segment
+│   │   ├── sam_segmenter.py # MobileSAM click-to-segment
+│   │   └── smart_crop.py  # Face-centric training crops
 │   └── ui/
 │       ├── wizard.py      # 4-step guided workflow
 │       └── dashboard.py   # Advanced tools (WIP)

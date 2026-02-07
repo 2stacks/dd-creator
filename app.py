@@ -25,9 +25,9 @@ if __name__ == "__main__":
 
     # Allow access to the root directory so files from external drives/mnt are also accessible
     app.launch(
-        server_name="0.0.0.0", 
-        server_port=7860, 
+        server_name="0.0.0.0",
+        server_port=7860,
         allowed_paths=["/"],
         share=False,
-        theme=gr.themes.Soft()
+        theme=gr.themes.Soft(),
     )
