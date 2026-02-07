@@ -44,6 +44,8 @@ src/
 
 **Model Lifecycle:** All GPU models follow lazy-load pattern. Models are loaded on-demand and must be explicitly unloaded with `model.unload_model()` followed by `torch.cuda.empty_cache()` and `gc.collect()` to free VRAM. Global instance getters: `get_captioner()`, `get_segmenter()`, `get_upscaler()`, `get_lama_inpainter()`, `get_sd_inpainter()`, `get_sam_segmenter()`.
 
+**RGBA Handling:** All captioning models use `_ensure_rgb()` in `captioning.py` to convert images to RGB. RGBA images (transparent PNGs from background removal) are composited onto a white background before captioning. This prevents models from seeing the original background pixels that `PIL.Image.convert("RGB")` would preserve when simply dropping the alpha channel.
+
 **File I/O:**
 - Captions: `.txt` files (UTF-8) in output directory
 - Masks: Binary PNG files in output directory

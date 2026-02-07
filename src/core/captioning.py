@@ -21,6 +21,14 @@ except ImportError:
     ort = None
     hf_hub_download = None
 
+def _ensure_rgb(image: Image.Image) -> Image.Image:
+    """Convert image to RGB, compositing RGBA onto white background."""
+    if image.mode == 'RGBA':
+        bg = Image.new('RGB', image.size, (255, 255, 255))
+        bg.paste(image, mask=image.split()[3])
+        return bg
+    return image.convert('RGB')
+
 class BaseCaptioner:
     def __init__(self, model_id, device=None, **kwargs):
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -98,9 +106,8 @@ class ONNXCaptioner(BaseCaptioner):
         # WD14 usually expects simple resize or smart resize. 
         # For simplicity and standard compliance with most taggers: BICUBIC resize to target.
         
-        # Ensure RGBA -> RGB -> BGR
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
+        # Ensure RGBA -> RGB (composite onto white) -> BGR
+        image = _ensure_rgb(image)
         
         # Resize
         image = image.resize((width, height), Image.BICUBIC)
@@ -170,7 +177,7 @@ class Florence2Captioner(BaseCaptioner):
             self.load_model()
         
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = _ensure_rgb(Image.open(image_path))
         except Exception as e:
             return f"Error: {e}"
 
@@ -210,7 +217,7 @@ class BlipCaptioner(BaseCaptioner):
             self.load_model()
             
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = _ensure_rgb(Image.open(image_path))
         except Exception as e:
             return f"Error: {e}"
 
@@ -240,7 +247,7 @@ class JoyCaptioner(BaseCaptioner):
             self.load_model()
 
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = _ensure_rgb(Image.open(image_path))
         except Exception as e:
             return f"Error: {e}"
 
@@ -352,7 +359,7 @@ class JoyCaptionerQuantized(BaseCaptioner):
             self.load_model()
 
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = _ensure_rgb(Image.open(image_path))
         except Exception as e:
             return f"Error: {e}"
 
@@ -438,7 +445,7 @@ class WD14Tagger(BaseCaptioner):
             self.load_model()
 
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = _ensure_rgb(Image.open(image_path))
         except Exception as e:
             return f"Error: {e}"
 
