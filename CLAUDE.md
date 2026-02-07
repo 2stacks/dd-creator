@@ -131,26 +131,22 @@ Gallery selection resets workbench to Resize tab. All save buttons use `variant=
 
 ## Step 3: Captioning UI Structure
 
-Two-column layout (40/60 split) with gallery height=700 and image preview height=500.
+Two-column layout (40/60 split) matching Step 2's "Left Sidebar + Right Tabbed Workspace" pattern.
 
-**Batch Generation accordion (open by default):**
-- Left column: Model dropdown (sorted alphabetically) + collapsible VRAM Requirements accordion
-- Right column: Threshold slider (WD14 only) + Filter rating tags checkbox (on by default)
-- Prefix/Suffix textboxes for static tags applied to all captions
-- "Generate Tags for All Images" button
+**Left column (40%):** Filter textbox + Gallery (4x4 grid, height=700) + Status textbox (2 lines).
 
-**Main area (two-column layout, 40/60 split):**
-- Left column: Gallery (4x4 grid, height=700) + Status textbox below gallery
-- Right column: Filter textbox + Image preview (height=500) + Caption editor (6 lines) + Hygiene tools + Save & Next button
+**Right column (60%) — Tabbed Workspace:**
+
+- **Editor tab (default):** Image preview (height=500) + Caption editor (6 lines) + Hygiene buttons row (Fix Format, Dedup Tags, Undo Changes) + Help accordion (closed) + Save & Next (primary, lg, scale=3) / Delete Image (stop, lg, scale=1)
+- **Auto-Tagging tab:** Image preview (height=500, synced with Editor preview via `.then()` chains) + Model dropdown (default: BLIP-Base) + Model Information accordion (closed) + WD14 options column (Threshold slider + Filter rating tags checkbox, auto-hidden when non-WD14 model selected) + Prefix/Suffix textboxes (same row) + Generate buttons row (Generate for All Images, Generate for Selected Image)
 
 **Hygiene tools:**
-- Collapsible help accordion explaining button functions (above buttons)
 - Fix Format: Normalize comma spacing, collapse extra whitespace, strip invisible Unicode chars, remove empty tags
 - Dedup Tags: Remove duplicate tags (case-insensitive), strips invisible chars before comparing
 - Undo Changes: Reload caption from disk (replaces in-memory undo tracking)
 - All hygiene tools use a `gr.State` + `.then()` chain to update the textbox (workaround for Gradio bug where a textbox used as both input and output of the same callback doesn't visually refresh)
 
-**Bulk Edit Tools accordion (closed by default):**
+**Bulk Edit Tools accordion (closed by default, full-width below bottom bar):**
 - Add Tags: Prepend/Append radio + tags input + Add to All button
 - Remove Tags: Comma-separated tags input + Remove from All button
 - Search & Replace: Partial/Exact match radio (default: Partial) + semicolon-separated pairs + Replace All button. Partial match does substring replace (works with natural language captions). Exact match replaces whole comma-separated tags only.

@@ -1467,6 +1467,17 @@ def render_wizard():
             return [], "No images found in output directory. Process images in Step 2 first."
         return _output_images, f"Found {len(_output_images)} images in output directory."
 
+    def _image_status(path):
+        """Build a status string for a selected image showing filename and caption state."""
+        basename = os.path.basename(path)
+        txt_path = os.path.splitext(path)[0] + ".txt"
+        if os.path.exists(txt_path):
+            return f"{basename} — caption saved"
+        elif _output_captions.get(path, ""):
+            return f"{basename} — caption in memory (unsaved)"
+        else:
+            return f"{basename} — no caption"
+
     def on_select_output_image(evt: gr.SelectData):
         """Handle gallery selection in Step 3 (output images)."""
         index = evt.index
@@ -1481,8 +1492,8 @@ def render_wizard():
                 img = None
             # Find the index in the full list for Save & Next navigation
             full_index = _output_images.index(path) if path in _output_images else -1
-            return path, img, caption, full_index
-        return None, None, "", -1
+            return path, img, caption, full_index, _image_status(path)
+        return None, None, "", -1, "Select an image from the gallery."
 
     def save_output_caption_action(path, new_caption):
         """Save caption for an output image."""
@@ -2319,67 +2330,15 @@ def render_wizard():
                 current_index_state = gr.State(-1)
                 hygiene_result_state = gr.State("")
 
-                # PHASE 1: Caption / Tag Generation (Accordion, Open by Default)
-                with gr.Accordion("Caption / Tag Generation", open=True):
-                    with gr.Row():
-                        # Left column: Model selector, Prefix, Suffix
-                        with gr.Column(scale=1):
-                            model_dropdown = gr.Dropdown(
-                                [
-                                    "BLIP-Base",
-                                    "BLIP-Large",
-                                    "Florence-2-Base",
-                                    "Florence-2-Large",
-                                    "JoyCaption (Beta One)",
-                                    "JoyCaption Quantized (8-bit)",
-                                    "SmilingWolf WD ConvNext (v3)",
-                                    "SmilingWolf WD ViT (v3)",
-                                ],
-                                label="Model",
-                                value="SmilingWolf WD ConvNext (v3)"
-                            )
-                            prefix_tags_box = gr.Textbox(
-                                label="Prefix (Prepend)",
-                                placeholder="e.g., sks, 1girl",
-                                max_lines=1
-                            )
-                            suffix_tags_box = gr.Textbox(
-                                label="Suffix (Append)",
-                                placeholder="e.g., best quality, 4k",
-                                max_lines=1
-                            )
-                        # Right column: VRAM Requirements, Threshold, Filter
-                        with gr.Column(scale=1):
-                            with gr.Accordion("🖥️ Model Information", open=False):
-                                gr.Markdown("""
-- **SmilingWolf WD14 (ViT/ConvNext):** ~2GB VRAM. Fast Danbooru-style tagging using ONNX runtime. Best for anime/illustration.
-- **BLIP-Base:** ~2GB VRAM. Natural language captions, good general purpose.
-- **BLIP-Large:** ~4GB VRAM. More detailed natural language captions.
-- **Florence-2-Base:** ~4GB VRAM. Microsoft's vision model, detailed scene descriptions.
-- **Florence-2-Large:** ~4GB VRAM. More detailed than base, similar VRAM usage.
-- **JoyCaption Quantized (8-bit):** ~12-16GB VRAM. High quality captions, requires 16GB+ GPU.
-- **JoyCaption (Beta One):** ~17GB VRAM. Full BF16 precision, requires 20GB+ GPU (RTX 3090/4090).
-""")
-                            threshold_slider = gr.Slider(
-                                label="Threshold (WD14 only)",
-                                minimum=0.0,
-                                maximum=1.0,
-                                value=0.35,
-                                step=0.05,
-                                info="Lower = more tags, higher = fewer but more confident tags"
-                            )
-                            filter_ratings_check = gr.Checkbox(
-                                label="Filter rating tags (general, sensitive, questionable, explicit)",
-                                value=True
-                            )
-                    with gr.Row():
-                        caption_btn = gr.Button("Generate for All Images", variant="primary")
-                        caption_single_btn = gr.Button("Generate for Selected Image", variant="primary")
-
-                # Main area: Library (left) and Editor (right)
+                # Main area: Gallery (left) and Tabbed Workspace (right)
                 with gr.Row():
-                    # LEFT COLUMN: Library (40%)
+                    # LEFT COLUMN: Gallery (40%)
                     with gr.Column(scale=40):
+                        search_filter_box = gr.Textbox(
+                            label="Filter",
+                            placeholder="Filter images by caption content...",
+                            max_lines=1
+                        )
                         gallery = gr.Gallery(
                             columns=4,
                             height=700,
@@ -2394,41 +2353,94 @@ def render_wizard():
                             max_lines=2,
                         )
 
-                    # RIGHT COLUMN: Editor (60%)
+                    # RIGHT COLUMN: Tabbed Workspace (60%)
                     with gr.Column(scale=60):
-                        search_filter_box = gr.Textbox(
-                            label="Filter",
-                            placeholder="Filter images by caption content...",
-                            max_lines=1
-                        )
-                        editor_preview = gr.Image(
-                            type="pil",
-                            height=500,
-                            interactive=False,
-                            show_label=False
-                        )
-                        editor_caption = gr.Textbox(
-                            label="Caption / Tags",
-                            lines=6,
-                            placeholder="Select an image to edit its caption...",
-                            autofocus=True
-                        )
-
-                        # Edit Tools
-                        gr.Markdown("**Edit Tools**")
-                        with gr.Row():
-                            fix_format_btn = gr.Button("Fix Format")
-                            dedup_btn = gr.Button("Dedup Tags")
-                            undo_btn = gr.Button("Undo Changes")
-                        with gr.Accordion("What do these buttons do?", open=False):
-                            gr.Markdown("""- **Fix Format**: Normalize comma spacing, collapse extra whitespace, remove empty tags
+                        with gr.Tabs():
+                            # Editor Tab (default)
+                            with gr.TabItem("Editor"):
+                                editor_preview = gr.Image(
+                                    type="pil",
+                                    height=500,
+                                    interactive=False,
+                                    show_label=False
+                                )
+                                editor_caption = gr.Textbox(
+                                    label="Caption / Tags",
+                                    lines=6,
+                                    placeholder="Select an image to edit its caption...",
+                                    autofocus=True
+                                )
+                                with gr.Row():
+                                    fix_format_btn = gr.Button("Fix Format")
+                                    dedup_btn = gr.Button("Dedup Tags")
+                                    undo_btn = gr.Button("Undo Changes")
+                                with gr.Accordion("What do these buttons do?", open=False):
+                                    gr.Markdown("""- **Fix Format**: Normalize comma spacing, collapse extra whitespace, remove empty tags
 - **Dedup Tags**: Remove duplicate tags (case-insensitive)
 - **Undo Changes**: Reload caption from disk""")
+                                with gr.Row():
+                                    save_next_btn = gr.Button("Save & Next", variant="primary", size="lg", scale=3)
+                                    delete_image_btn = gr.Button("Delete Image", variant="stop", size="lg", scale=1)
 
-                        # Navigation
-                        with gr.Row():
-                            save_next_btn = gr.Button("Save & Next", variant="primary", size="lg", scale=3)
-                            delete_image_btn = gr.Button("Delete Image", variant="stop", size="lg", scale=1)
+                            # Auto-Tagging Tab
+                            with gr.TabItem("Auto-Tagging"):
+                                tagging_preview = gr.Image(
+                                    type="pil",
+                                    height=500,
+                                    interactive=False,
+                                    show_label=False
+                                )
+                                model_dropdown = gr.Dropdown(
+                                    [
+                                        "BLIP-Base",
+                                        "BLIP-Large",
+                                        "Florence-2-Base",
+                                        "Florence-2-Large",
+                                        "JoyCaption (Beta One)",
+                                        "JoyCaption Quantized (8-bit)",
+                                        "SmilingWolf WD ConvNext (v3)",
+                                        "SmilingWolf WD ViT (v3)",
+                                    ],
+                                    label="Model",
+                                    value="BLIP-Base"
+                                )
+                                with gr.Accordion("Model Information", open=False):
+                                    gr.Markdown("""
+- **SmilingWolf WD14 (ViT/ConvNext):** ~2GB VRAM. Fast Danbooru-style tagging using ONNX runtime. Best for anime/illustration.
+- **BLIP-Base:** ~2GB VRAM. Natural language captions, good general purpose.
+- **BLIP-Large:** ~4GB VRAM. More detailed natural language captions.
+- **Florence-2-Base:** ~4GB VRAM. Microsoft's vision model, detailed scene descriptions.
+- **Florence-2-Large:** ~4GB VRAM. More detailed than base, similar VRAM usage.
+- **JoyCaption Quantized (8-bit):** ~12-16GB VRAM. High quality captions, requires 16GB+ GPU.
+- **JoyCaption (Beta One):** ~17GB VRAM. Full BF16 precision, requires 20GB+ GPU (RTX 3090/4090).
+""")
+                                with gr.Column(visible=False) as wd14_options_col:
+                                    threshold_slider = gr.Slider(
+                                        label="Threshold",
+                                        minimum=0.0,
+                                        maximum=1.0,
+                                        value=0.35,
+                                        step=0.05,
+                                        info="Lower = more tags, higher = fewer but more confident tags"
+                                    )
+                                    filter_ratings_check = gr.Checkbox(
+                                        label="Filter rating tags (general, sensitive, questionable, explicit)",
+                                        value=True
+                                    )
+                                with gr.Row():
+                                    prefix_tags_box = gr.Textbox(
+                                        label="Prefix (Prepend)",
+                                        placeholder="e.g., sks, 1girl",
+                                        max_lines=1
+                                    )
+                                    suffix_tags_box = gr.Textbox(
+                                        label="Suffix (Append)",
+                                        placeholder="e.g., best quality, 4k",
+                                        max_lines=1
+                                    )
+                                with gr.Row():
+                                    caption_btn = gr.Button("Generate for All Images", variant="primary")
+                                    caption_single_btn = gr.Button("Generate for Selected Image", variant="primary")
 
                 # Bulk Edit Tools (Accordion, Closed)
                 with gr.Accordion("Bulk Edit Tools", open=False):
@@ -3025,6 +3037,20 @@ def render_wizard():
         images, status = refresh_output_gallery()
         return gr.Tabs(selected=2), images, status
 
+    def auto_select_first_output():
+        """Auto-select the first output image into the editor previews."""
+        if not _output_images:
+            return None, None, None, "", -1, "No images found in output directory."
+        first_path = _output_images[0]
+        first_caption = _output_captions.get(first_path, "")
+        try:
+            first_img = Image.open(first_path)
+            first_img = ImageOps.exif_transpose(first_img)
+        except Exception:
+            first_img = None
+        status = f"Found {len(_output_images)} images. {_image_status(first_path)}"
+        return first_path, first_img, first_img, first_caption, 0, status
+
     back_btn_2.click(lambda: gr.Tabs(selected=0), outputs=tabs)
     next_btn_2.click(go_to_step3, outputs=[tabs, gallery, save_status])
 
@@ -3041,8 +3067,21 @@ def render_wizard():
         outputs=[save_status, editor_caption]
     )
 
-    # When tab is selected, refresh gallery with output images
-    tab_step_3.select(refresh_output_gallery, outputs=[gallery, save_status])
+    # Toggle WD14-specific options based on model selection
+    model_dropdown.change(
+        lambda m: gr.Column(visible=m.startswith("SmilingWolf")),
+        inputs=model_dropdown,
+        outputs=wd14_options_col
+    )
+
+    # When tab is selected, refresh gallery with output images and auto-select first
+    tab_step_3.select(
+        refresh_output_gallery, outputs=[gallery, save_status]
+    ).then(
+        auto_select_first_output,
+        outputs=[current_path_state, editor_preview, tagging_preview,
+                 editor_caption, current_index_state, save_status]
+    )
 
     # Search/filter functionality
     search_filter_box.change(filter_gallery_action, inputs=search_filter_box, outputs=gallery)
@@ -3050,7 +3089,9 @@ def render_wizard():
     # When gallery image is selected, update editor with preview
     gallery.select(
         on_select_output_image,
-        outputs=[current_path_state, editor_preview, editor_caption, current_index_state]
+        outputs=[current_path_state, editor_preview, editor_caption, current_index_state, save_status]
+    ).then(
+        lambda img: img, inputs=editor_preview, outputs=tagging_preview
     )
 
     # Hygiene tools
@@ -3100,6 +3141,8 @@ def render_wizard():
         save_and_next_action,
         inputs=[current_path_state, editor_caption, current_index_state],
         outputs=[save_status, current_path_state, editor_preview, editor_caption, current_index_state]
+    ).then(
+        lambda img: img, inputs=editor_preview, outputs=tagging_preview
     )
 
     # Delete image button
@@ -3107,6 +3150,8 @@ def render_wizard():
         delete_image_action,
         inputs=current_path_state,
         outputs=[save_status, gallery, editor_preview, editor_caption, current_index_state]
+    ).then(
+        lambda img: img, inputs=editor_preview, outputs=tagging_preview
     )
 
     # Bulk tools
@@ -3179,6 +3224,7 @@ def render_wizard():
             _get_default_export_dir("ai_toolkit"),
             trigger,
             _get_default_export_dir("kohya_ss"),
+            trigger,
             _get_default_export_dir("onetrainer"),
             _get_default_export_dir("huggingface"),
             trigger,  # hf_repo_name default
@@ -3229,7 +3275,7 @@ def render_wizard():
 
     tab_step_4.select(
         init_export_tab,
-        outputs=[export_status, aitk_trigger, aitk_export_dir, kohya_trigger, kohya_export_dir, ot_export_dir, hf_export_dir, hf_repo_name]
+        outputs=[export_status, aitk_trigger, aitk_export_dir, kohya_trigger, kohya_export_dir, ot_trigger, ot_export_dir, hf_export_dir, hf_repo_name]
     )
 
     # FileExplorer → Textbox updates for export directories
