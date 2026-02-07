@@ -15,11 +15,11 @@ class ProcessorAction(Enum):
     DIRECT_RESIZE = "resized"
 
 # Directory where user places .pth model files
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "models")
 
 
 def get_available_models() -> list[str]:
-    """Scan .models/ directory for available upscaler model files."""
+    """Scan models/ directory for available upscaler model files."""
     if not os.path.isdir(MODELS_DIR):
         return []
 

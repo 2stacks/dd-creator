@@ -7,7 +7,7 @@ import os
 # MobileSAM checkpoint URL
 _CHECKPOINT_URL = "https://raw.githubusercontent.com/ChaoningZhang/MobileSAM/master/weights/mobile_sam.pt"
 _CHECKPOINT_NAME = "mobile_sam.pt"
-_MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".models")
+_MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "models")
 
 
 class MobileSAMSegmenter:

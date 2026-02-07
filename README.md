@@ -64,7 +64,7 @@ Open your browser to `http://127.0.0.1:7860`
 
 ### Upscaler Models
 
-Place Real-ESRGAN `.pth` or `.safetensors` model files in the `.models/` directory. Popular options:
+Place Real-ESRGAN `.pth` or `.safetensors` model files in the `models/` directory. Popular options:
 - [RealESRGAN_x4plus](https://github.com/xinntao/Real-ESRGAN)
 - [4x-UltraSharp](https://openmodeldb.info/models/4x-UltraSharp)
 
@@ -101,17 +101,13 @@ dd-creator/
 │   └── ui/
 │       ├── wizard.py      # 4-step guided workflow
 │       └── dashboard.py   # Advanced tools (WIP)
-├── .models/               # User-provided upscaler models
-├── .hf_cache/             # HuggingFace model cache
+├── models/                # User-provided upscaler models
 └── assets/                # README screenshots
 ```
 
 ## Development
 
 ```bash
-# Add dependencies
-uv add <package_name>
-
 # Run with auto-reload (if using gradio dev mode)
 uv run gradio app.py
 ```

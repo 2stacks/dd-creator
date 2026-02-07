@@ -340,7 +340,7 @@ def render_wizard():
         if not image_path:
             return None, None, "No image selected."
         if not model_name or model_name == "No models found":
-            return None, None, "No upscaler model selected. Place .pth files in .models/"
+            return None, None, "No upscaler model selected. Place .pth files in models/"
         try:
             from src.core.upscaling import resize_to_shortest_side
 

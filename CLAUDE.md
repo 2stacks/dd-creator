@@ -48,9 +48,9 @@ src/
 - Captions: `.txt` files (UTF-8) in output directory
 - Masks: Binary PNG files in output directory
 - Inpainted images: `<basename>_inpainted.jpg` (98% quality) in output directory
-- Model cache: `.hf_cache/` directory (HuggingFace models)
-- Upscaler models: `.models/` directory for user-provided `.pth`/`.safetensors` files
-- SAM checkpoint: `.models/mobile_sam.pt` (auto-downloaded from HuggingFace)
+- Model cache: `.hf_cache/` directory (auto-created, HuggingFace models)
+- Upscaler models: `models/` directory for user-provided `.pth`/`.safetensors` files
+- SAM checkpoint: `models/mobile_sam.pt` (auto-downloaded from HuggingFace)
 
 ## Step 1: Project Setup UI Structure
 

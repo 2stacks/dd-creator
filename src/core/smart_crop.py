@@ -5,7 +5,7 @@ from PIL import Image
 from typing import List, Tuple
 
 # Model path — auto-downloaded if missing
-_MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", ".models")
+_MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models")
 _MODEL_PATH = os.path.join(_MODEL_DIR, "blaze_face_short_range.tflite")
 _MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
 
