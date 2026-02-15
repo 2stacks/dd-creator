@@ -145,16 +145,61 @@ def render_wizard():
         lines = []
         lines.append(f"Source: {source_rel}")
         lines.append(f"Found {count} images")
-        total_caps = output_caps + source_only_caps
-        if total_caps > 0:
-            cap_line = f"Found {total_caps} existing captions"
+        if output_caps > 0 or source_only_caps > 0:
+            cap_parts = []
+            if output_caps > 0:
+                cap_parts.append(f"{output_caps} output captions")
             if source_only_caps > 0:
-                cap_line += f" ({source_only_caps} in source only)"
-            lines.append(cap_line)
+                cap_parts.append(f"{source_only_caps} source-only captions")
+            lines.append(f"Found {', '.join(cap_parts)}")
         if output_created:
             lines.append(f"Output: {output_rel} (created)")
         else:
             lines.append(f"Output: {output_rel}")
+            # Report existing output directory contents
+            output_stats = []
+            valid_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+            output_image_count = 0
+            output_caption_count = 0
+            mask_count = 0
+            transparent_count = 0
+            inpainted_count = 0
+            for root, dirs, files in os.walk(final_output_path):
+                if 'masks' in dirs:
+                    dirs.remove('masks')
+                if 'export' in dirs:
+                    dirs.remove('export')
+                for f in files:
+                    fl = f.lower()
+                    if fl.endswith('.txt'):
+                        output_caption_count += 1
+                        continue
+                    if not fl.endswith(valid_extensions):
+                        continue
+                    if '_mask.' in fl:
+                        continue
+                    if '_transparent.' in fl:
+                        transparent_count += 1
+                    elif '_inpainted.' in fl:
+                        inpainted_count += 1
+                    else:
+                        output_image_count += 1
+            masks_dir = os.path.join(final_output_path, "masks")
+            if os.path.isdir(masks_dir):
+                mask_count = sum(1 for f in os.listdir(masks_dir)
+                                 if f.lower().endswith('.png') and '_mask' in f.lower())
+            if output_image_count:
+                output_stats.append(f"{output_image_count} images")
+            if output_caption_count:
+                output_stats.append(f"{output_caption_count} captions")
+            if mask_count:
+                output_stats.append(f"{mask_count} masks")
+            if transparent_count:
+                output_stats.append(f"{transparent_count} transparent")
+            if inpainted_count:
+                output_stats.append(f"{inpainted_count} inpainted")
+            if output_stats:
+                lines.append(f"Output contains: {', '.join(output_stats)}")
 
         return "\n".join(lines), gr.update(interactive=(count > 0))
 
@@ -1416,9 +1461,11 @@ def render_wizard():
         captions = {}
 
         for root, dirs, files in os.walk(global_state.output_directory):
-            # Skip masks subdirectory
+            # Skip masks and export subdirectories
             if 'masks' in dirs:
                 dirs.remove('masks')
+            if 'export' in dirs:
+                dirs.remove('export')
             for file in files:
                 if file.lower().endswith(valid_extensions):
                     file_lower = file.lower()
@@ -3195,14 +3242,32 @@ def render_wizard():
     def _get_stats_text():
         output_images, output_captions = get_output_images()
         saved_captions = sum(1 for c in output_captions.values() if c)
+        # Count from actual output directory contents for accuracy
+        mask_count = 0
+        transparent_count = 0
+        inpainted_count = 0
+        upscaled_count = sum(1 for p in global_state.upscaled.values() if os.path.exists(p))
+        if global_state.output_directory and os.path.isdir(global_state.output_directory):
+            masks_dir = os.path.join(global_state.output_directory, "masks")
+            if os.path.isdir(masks_dir):
+                mask_count = sum(1 for f in os.listdir(masks_dir)
+                                 if f.lower().endswith('.png') and '_mask' in f.lower())
+            for f in os.listdir(global_state.output_directory):
+                fl = f.lower()
+                if fl.endswith('.txt'):
+                    continue
+                if '_transparent.' in fl:
+                    transparent_count += 1
+                elif '_inpainted.' in fl:
+                    inpainted_count += 1
         parts = [
             f"Source: {len(global_state.image_paths)}",
             f"Output: {len(output_images)}",
             f"Captions: {saved_captions}",
-            f"Masks: {len(global_state.masks)}",
-            f"Transparent: {len(global_state.transparent)}",
-            f"Upscaled: {len(global_state.upscaled)}",
-            f"Inpainted: {len(global_state.inpainted)}",
+            f"Masks: {mask_count}",
+            f"Transparent: {transparent_count}",
+            f"Upscaled: {upscaled_count}",
+            f"Inpainted: {inpainted_count}",
         ]
         return "Session — " + " | ".join(parts)
 
