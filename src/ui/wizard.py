@@ -15,7 +15,9 @@ from src.core.sam_segmenter import get_sam_segmenter
 from src.core.inpainting import get_lama_inpainter, get_sd_inpainter, SDInpainter
 from src.core.export import export_kohya, export_ai_toolkit, export_onetrainer, export_huggingface, push_to_huggingface
 
-def render_wizard():
+SESSION_FILE = ".last_session.json"
+
+def render_wizard(demo=None, resume=False):
     # Ensure default directories exist for FileExplorer components
     os.makedirs("datasets/input", exist_ok=True)
     os.makedirs("datasets/output", exist_ok=True)
@@ -144,14 +146,12 @@ def render_wizard():
 
         lines = []
         lines.append(f"Source: {source_rel}")
-        lines.append(f"Found {count} images")
-        if output_caps > 0 or source_only_caps > 0:
-            cap_parts = []
-            if output_caps > 0:
-                cap_parts.append(f"{output_caps} output captions")
-            if source_only_caps > 0:
-                cap_parts.append(f"{source_only_caps} source-only captions")
-            lines.append(f"Found {', '.join(cap_parts)}")
+        source_stats = [f"{count} images"]
+        if output_caps > 0:
+            source_stats.append(f"{output_caps} output captions")
+        if source_only_caps > 0:
+            source_stats.append(f"{source_only_caps} source-only captions")
+        lines.append(f"Source contains: {', '.join(source_stats)}")
         if output_created:
             lines.append(f"Output: {output_rel} (created)")
         else:
@@ -201,16 +201,55 @@ def render_wizard():
             if output_stats:
                 lines.append(f"Output contains: {', '.join(output_stats)}")
 
+        # Save session for --resume on next launch
+        if count > 0:
+            import json
+            try:
+                with open(SESSION_FILE, "w") as f:
+                    json.dump({"source": source_path, "output": final_output_path}, f)
+            except Exception:
+                pass
+
         return "\n".join(lines), gr.update(interactive=(count > 0))
+
+    # Cached captioner — stays loaded until the user switches model type
+    _cached_captioner = None
+    _cached_captioner_name = None
+
+    def _get_or_load_captioner(model_name):
+        nonlocal _cached_captioner, _cached_captioner_name
+        if _cached_captioner is not None and _cached_captioner_name == model_name:
+            return _cached_captioner
+        # Different model requested — unload the old one
+        if _cached_captioner is not None:
+            _cached_captioner.unload_model()
+            _cached_captioner = None
+            _cached_captioner_name = None
+        captioner = get_captioner(model_name)
+        captioner.load_model()
+        _cached_captioner = captioner
+        _cached_captioner_name = model_name
+        return captioner
+
+    def _unload_captioner():
+        nonlocal _cached_captioner, _cached_captioner_name
+        if _cached_captioner is not None:
+            _cached_captioner.unload_model()
+            _cached_captioner = None
+            _cached_captioner_name = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return "Captioning model unloaded from VRAM."
+        return "No captioning model loaded."
 
     def run_captioning_action(model_name, progress=gr.Progress()):
         if not global_state.image_paths:
             return "No images to caption."
-        captioner = None
         total = len(global_state.image_paths)
         success_count = 0
         try:
-            captioner = get_captioner(model_name)
+            captioner = _get_or_load_captioner(model_name)
             for i, img_path in enumerate(progress.tqdm(global_state.image_paths)):
                 try:
                     cap = captioner.generate_caption(img_path)
@@ -224,9 +263,6 @@ def render_wizard():
                     print(f"Captioning error for {img_path}: {e}")
         except Exception as e:
             return f"Model Error: {e}"
-        finally:
-            if captioner:
-                captioner.unload_model()
         return f"Completed. {success_count}/{total} images captioned."
 
     def on_select_image(evt: gr.SelectData):
@@ -1862,17 +1898,18 @@ def render_wizard():
         return tags
 
     def run_output_captioning_action(model_name, threshold, prefix_tags, suffix_tags, filter_ratings, progress=gr.Progress()):
-        """Generate captions for all output images."""
+        """Generate captions for all output images (generator for live status updates)."""
         if not _output_images:
-            return "No images in output directory."
-        captioner = None
+            yield "No images in output directory."
+            return
         total = len(_output_images)
         success_count = 0
         prefix = prefix_tags.strip().rstrip(",").strip() if prefix_tags else ""
         suffix = suffix_tags.strip().lstrip(",").strip() if suffix_tags else ""
 
         try:
-            captioner = get_captioner(model_name)
+            yield f"Loading {model_name}..."
+            captioner = _get_or_load_captioner(model_name)
             for img_path in progress.tqdm(_output_images):
                 try:
                     # Pass threshold for WD14 models
@@ -1902,27 +1939,28 @@ def render_wizard():
                     with open(txt_path, "w", encoding="utf-8") as f:
                         f.write(cap)
                     success_count += 1
+                    yield f"Captioning image {success_count}/{total}..."
                 except Exception as e:
                     print(f"Captioning error for {img_path}: {e}")
         except Exception as e:
-            return f"Model Error: {e}"
-        finally:
-            if captioner:
-                captioner.unload_model()
-        return f"Completed. {success_count}/{total} images captioned."
+            yield f"Model Error: {e}"
+            return
+        yield f"Completed. {success_count}/{total} images captioned."
 
     def run_single_captioning_action(img_path, model_name, threshold, prefix_tags, suffix_tags, filter_ratings):
-        """Generate caption for a single selected image."""
+        """Generate caption for a single selected image (generator for live status updates)."""
         if not img_path:
-            return "No image selected.", ""
+            yield "No image selected.", ""
+            return
 
         prefix = prefix_tags.strip().rstrip(",").strip() if prefix_tags else ""
         suffix = suffix_tags.strip().lstrip(",").strip() if suffix_tags else ""
-        captioner = None
 
         try:
-            captioner = get_captioner(model_name)
+            yield f"Loading {model_name}...", ""
+            captioner = _get_or_load_captioner(model_name)
 
+            yield "Generating caption...", ""
             if "WD" in model_name:
                 cap = captioner.generate_caption(img_path, threshold=threshold)
             else:
@@ -1947,12 +1985,10 @@ def render_wizard():
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(cap)
 
-            return f"Generated caption for {os.path.basename(img_path)}", cap
+            yield f"Generated caption for {os.path.basename(img_path)}", cap
         except Exception as e:
-            return f"Captioning error: {e}", ""
-        finally:
-            if captioner:
-                captioner.unload_model()
+            yield f"Captioning error: {e}", ""
+            return
 
     # --- UI LAYOUT ---
     
@@ -2441,10 +2477,11 @@ def render_wizard():
                                     [
                                         "BLIP-Base",
                                         "BLIP-Large",
-                                        "Florence-2-Base",
-                                        "Florence-2-Large",
+                                        "JoyCaption (8-bit)",
                                         "JoyCaption (Beta One)",
-                                        "JoyCaption Quantized (8-bit)",
+                                        "Qwen2.5-VL 3B",
+                                        "Qwen2.5-VL 7B (4-bit)",
+                                        "Qwen2.5-VL 7B (8-bit)",
                                         "SmilingWolf WD ConvNext (v3)",
                                         "SmilingWolf WD ViT (v3)",
                                     ],
@@ -2453,13 +2490,14 @@ def render_wizard():
                                 )
                                 with gr.Accordion("Model Information", open=False):
                                     gr.Markdown("""
-- **SmilingWolf WD14 (ViT/ConvNext):** ~2GB VRAM. Fast Danbooru-style tagging using ONNX runtime. Best for anime/illustration.
-- **BLIP-Base:** ~2GB VRAM. Natural language captions, good general purpose.
-- **BLIP-Large:** ~4GB VRAM. More detailed natural language captions.
-- **Florence-2-Base:** ~4GB VRAM. Microsoft's vision model, detailed scene descriptions.
-- **Florence-2-Large:** ~4GB VRAM. More detailed than base, similar VRAM usage.
-- **JoyCaption Quantized (8-bit):** ~12-16GB VRAM. High quality captions, requires 16GB+ GPU.
-- **JoyCaption (Beta One):** ~17GB VRAM. Full BF16 precision, requires 20GB+ GPU (RTX 3090/4090).
+- **BLIP-Base:** ~1GB VRAM. Natural language captions, good general purpose.
+- **BLIP-Large:** ~1GB VRAM. More detailed natural language captions.
+- **JoyCaption (8-bit):** ~10GB VRAM. High quality captions, requires 12GB+ GPU.
+- **JoyCaption (Beta One):** ~14GB VRAM. Full BF16 precision, requires 16GB+ GPU (RTX 4090/3090).
+- **Qwen2.5-VL 3B:** ~10GB VRAM. Fast VLM captions in half precision. Good for quick drafts.
+- **Qwen2.5-VL 7B (4-bit):** ~9GB VRAM. Best speed/quality tradeoff. Recommended for 12GB+ GPUs.
+- **Qwen2.5-VL 7B (8-bit):** ~12GB VRAM. Highest quality Qwen option, slower on mid-range GPUs.
+- **SmilingWolf WD14 (ViT/ConvNext):** ~1GB VRAM. Fast Danbooru-style tagging using ONNX runtime. Best for anime/illustration.
 """)
                                 with gr.Column(visible=False) as wd14_options_col:
                                     threshold_slider = gr.Slider(
@@ -2488,6 +2526,7 @@ def render_wizard():
                                 with gr.Row():
                                     caption_btn = gr.Button("Generate for All Images", variant="primary")
                                     caption_single_btn = gr.Button("Generate for Selected Image", variant="primary")
+                                    caption_unload_btn = gr.Button("⏏ Unload Model", variant="secondary")
 
                 # Bulk Edit Tools (Accordion, Closed)
                 with gr.Accordion("Bulk Edit Tools", open=False):
@@ -2760,6 +2799,60 @@ def render_wizard():
 
     # Navigation
     next_btn_1.click(lambda: gr.Tabs(selected=1), outputs=tabs)
+
+    # Auto-resume last session on app load
+    if resume:
+        def _resume_session():
+            import json
+            try:
+                with open(SESSION_FILE) as f:
+                    session = json.load(f)
+                source = session["source"]
+                output = session["output"]
+            except (FileNotFoundError, KeyError, json.JSONDecodeError):
+                return {
+                    scan_output: "Resume: No saved session found. Please set up your project manually.",
+                }
+
+            if not os.path.isdir(source) or not os.path.isdir(output):
+                return {
+                    scan_output: f"Resume: Saved directories no longer exist.\n  Source: {source}\n  Output: {output}",
+                }
+
+            _, output_caps, source_only_caps = global_state.scan_directory(source, output)
+            count = len(global_state.image_paths)
+            if count == 0:
+                return {
+                    input_dir: source,
+                    output_dir: output,
+                    scan_output: f"Resume: No images found in {source}",
+                }
+
+            source_rel = to_relative_path(source)
+            output_rel = to_relative_path(output)
+            lines = [f"Resumed session — {count} images"]
+            lines.append(f"Source: {source_rel}")
+            lines.append(f"Output: {output_rel}")
+            if output_caps > 0 or source_only_caps > 0:
+                cap_parts = []
+                if output_caps > 0:
+                    cap_parts.append(f"{output_caps} output captions")
+                if source_only_caps > 0:
+                    cap_parts.append(f"{source_only_caps} source-only captions")
+                lines.append(f"Found {', '.join(cap_parts)}")
+
+            return {
+                input_dir: source,
+                output_dir: output,
+                scan_output: "\n".join(lines),
+                next_btn_1: gr.update(interactive=True),
+                tabs: gr.Tabs(selected=1),
+            }
+
+        demo.load(
+            _resume_session,
+            outputs=[input_dir, output_dir, scan_output, next_btn_1, tabs],
+        )
 
     # Step 2: Image Tools - shared output list for workbench updates
     _step2_workbench_outputs = [
@@ -3113,6 +3206,8 @@ def render_wizard():
         inputs=[current_path_state, model_dropdown, threshold_slider, prefix_tags_box, suffix_tags_box, filter_ratings_check],
         outputs=[save_status, editor_caption]
     )
+
+    caption_unload_btn.click(_unload_captioner, outputs=save_status)
 
     # Toggle WD14-specific options based on model selection
     model_dropdown.change(

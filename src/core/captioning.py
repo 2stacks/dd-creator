@@ -2,17 +2,18 @@ import torch
 from transformers import (
     AutoProcessor,
     AutoModelForCausalLM,
+    AutoTokenizer,
     BlipProcessor,
     BlipForConditionalGeneration,
     AutoModelForImageClassification,
     AutoImageProcessor,
     LlavaForConditionalGeneration,
     BitsAndBytesConfig,
+    Qwen2_5_VLForConditionalGeneration,
 )
 from PIL import Image
 import numpy as np
 import gc
-import os
 import csv
 try:
     import onnxruntime as ort
@@ -20,6 +21,10 @@ try:
 except ImportError:
     ort = None
     hf_hub_download = None
+try:
+    from qwen_vl_utils import process_vision_info
+except ImportError:
+    process_vision_info = None
 
 def _ensure_rgb(image: Image.Image) -> Image.Image:
     """Convert image to RGB, compositing RGBA onto white background."""
@@ -159,47 +164,91 @@ class ONNXCaptioner(BaseCaptioner):
                     
         return ", ".join(results)
 
-class Florence2Captioner(BaseCaptioner):
+class Qwen25VLCaptioner(BaseCaptioner):
+    def __init__(self, model_id, bits=8, **kwargs):
+        super().__init__(model_id, **kwargs)
+        self.bits = bits
+
     def load_model(self):
         if self.model is not None:
             return
-        print(f"Loading {self.model_id}...")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, 
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-            attn_implementation="eager"
-        ).to(self.device)
-        self.processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
 
-    def generate_caption(self, image_path, task_prompt="<MORE_DETAILED_CAPTION>"):
+        if process_vision_info is None:
+            raise ImportError("qwen-vl-utils is required for Qwen2.5-VL. Install with: pip install qwen-vl-utils")
+
+        dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+        bnb_config = None
+
+        if self.bits == 4:
+            print(f"Loading {self.model_id} (4-bit quantized)...")
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=dtype,
+                bnb_4bit_quant_type="nf4",
+                llm_int8_skip_modules=["visual"],
+            )
+        elif self.bits == 8:
+            print(f"Loading {self.model_id} (8-bit quantized)...")
+            bnb_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_skip_modules=["visual"],
+            )
+        else:
+            print(f"Loading {self.model_id} ({dtype})...")
+
+        self.processor = AutoProcessor.from_pretrained(self.model_id, use_fast=False)
+        load_kwargs = dict(device_map="cuda:0" if torch.cuda.is_available() else "cpu")
+        if bnb_config is not None:
+            load_kwargs["quantization_config"] = bnb_config
+        else:
+            load_kwargs["torch_dtype"] = dtype
+        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self.model_id,
+            **load_kwargs,
+        )
+        self.model.eval()
+
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"Model loaded. GPU memory allocated: {allocated:.2f} GB")
+
+    def generate_caption(self, image_path, prompt="Describe this image in detail.", **kwargs):
         if self.model is None:
             self.load_model()
-        
+
         try:
             image = _ensure_rgb(Image.open(image_path))
         except Exception as e:
             return f"Error: {e}"
 
-        inputs = self.processor(text=task_prompt, images=image, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
-        if inputs["pixel_values"].dtype in [torch.float16, torch.float32]:
-             inputs["pixel_values"] = inputs["pixel_values"].to(dtype)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
 
-        generated_ids = self.model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=1024,
-            do_sample=False,
-            num_beams=3,
-        )
-        generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-        parsed = self.processor.post_process_generation(
-            generated_text, task=task_prompt, image_size=(image.width, image.height)
-        )
-        return parsed.get(task_prompt, generated_text)
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self.processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(self.model.device)
+
+        with torch.no_grad():
+            generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
+
+        # Trim prompt tokens from output
+        generated_ids = generated_ids[:, inputs["input_ids"].shape[1]:]
+        caption = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return caption.strip()
+
 
 class BlipCaptioner(BaseCaptioner):
     def load_model(self):
@@ -475,9 +524,12 @@ class WD14Tagger(BaseCaptioner):
         return ", ".join(results)
 
 def get_captioner(name: str):
-    if "Florence" in name:
-        mid = "microsoft/Florence-2-large" if "Large" in name else "microsoft/Florence-2-base"
-        return Florence2Captioner(mid)
+    if "Qwen" in name and "3B" in name:
+        return Qwen25VLCaptioner("Qwen/Qwen2.5-VL-3B-Instruct", bits=16)
+    elif "Qwen" in name and "4-bit" in name:
+        return Qwen25VLCaptioner("Qwen/Qwen2.5-VL-7B-Instruct", bits=4)
+    elif "Qwen" in name:
+        return Qwen25VLCaptioner("Qwen/Qwen2.5-VL-7B-Instruct", bits=8)
     elif "BLIP-Large" in name:
         return BlipCaptioner("Salesforce/blip-image-captioning-large")
     elif "BLIP-Base" in name:
@@ -492,8 +544,6 @@ def get_captioner(name: str):
     elif "WD ConvNext" in name:
         return ONNXCaptioner("SmilingWolf/wd-v1-4-convnextv2-tagger-v2")
     elif "SmilingWolf" in name or "WD 1.4" in name:
-        # Use p1atdev's mirror for WD14 v3 SwinV2 which is compatible with transformers
         return WD14Tagger("p1atdev/wd-swinv2-tagger-v3-hf")
     else:
-        # Default
-        return Florence2Captioner("microsoft/Florence-2-base")
+        return BlipCaptioner("Salesforce/blip-image-captioning-base")

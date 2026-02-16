@@ -151,6 +151,7 @@ cython_debug/
 .claude/
 
 # Project Specific
+.last_session.json
 *.log
 datasets/input/*
 !datasets/input/.gitkeep

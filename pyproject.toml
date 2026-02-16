@@ -8,7 +8,7 @@ dependencies = [
     "gradio>=6.0.0",
     "torch",
     "torchvision",
-    "transformers>=4.48.0",
+    "transformers>=4.48.0,<5.0",
     "pillow",
     "numpy",
     "einops",
@@ -26,4 +26,6 @@ dependencies = [
     "mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git",
     "opencv-python-headless",
     "mediapipe",
+    "qwen-vl-utils",
+    "sentencepiece",
 ]
