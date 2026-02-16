@@ -23,7 +23,7 @@ app.py                    # Entry point - Gradio interface setup
 src/
   core/
     state.py              # ProjectState singleton - shared across all modules
-    captioning.py         # ML model wrappers (Florence2, BLIP, JoyCaption, WD14 ONNX)
+    captioning.py         # ML model wrappers (Qwen2.5-VL, BLIP, JoyCaption, WD14 ONNX)
     segmentation.py       # BiRefNet background removal and mask generation
     upscaling.py          # Spandrel upscaling with tiled processing
     inpainting.py         # LaMa + Stable Diffusion inpainting backends
@@ -185,11 +185,13 @@ Gallery filtering tracks displayed images separately (`_displayed_images`) so se
 ## GPU Memory Reference
 
 **Captioning:**
-- Florence-2 Base/Large: ~4GB VRAM
-- BLIP Base/Large: ~2-4GB VRAM
-- JoyCaption BF16: ~17GB VRAM (requires 20GB+ GPU)
-- JoyCaption 8-bit: ~12-16GB VRAM (requires minimum 16GB GPU)
-- WD14 ONNX taggers: ~2GB VRAM (uses onnxruntime-gpu)
+- BLIP Base/Large: ~1GB VRAM
+- Qwen2.5-VL 3B (bf16/fp16): ~10GB VRAM
+- Qwen2.5-VL 7B (4-bit): ~9GB VRAM
+- Qwen2.5-VL 7B (8-bit): ~12GB VRAM
+- JoyCaption BF16: ~14GB VRAM (requires 16GB+ GPU)
+- JoyCaption 8-bit: ~10GB VRAM (requires 12GB+ GPU)
+- WD14 ONNX taggers: ~1GB VRAM (uses onnxruntime-gpu)
 
 **Image Processing:**
 - BiRefNet segmentation: ~4GB VRAM

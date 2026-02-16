@@ -14,7 +14,7 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 - **Background Removal** - BiRefNet-powered automatic mask generation and transparency
   - Processes individual images or all smart crops in batch
 - **Auto-Captioning** - Multiple model options:
-  - Florence-2 (Base/Large) - Fast, detailed captions
+  - Qwen2.5-VL (3B / 7B 4-bit / 7B 8-bit) - Vision-language model captions
   - BLIP (Base/Large) - Lightweight natural language captions
   - JoyCaption - High-quality descriptive captions (BF16 or 8-bit quantized)
   - WD14 Taggers (ONNX) - Booru-style tags via ViT, ConvNext, or SwinV2
@@ -38,11 +38,13 @@ A local, GPU-accelerated tool for creating high-quality training datasets for di
 
 | Model | VRAM |
 |-------|------|
-| Florence-2 | ~4GB |
-| BLIP | ~2-4GB |
-| JoyCaption (BF16) | ~17GB (requires 20GB+ GPU) |
-| JoyCaption (8-bit) | ~12-16GB (requires 16GB+ GPU) |
-| WD14 ONNX | ~2GB |
+| BLIP | ~1GB |
+| Qwen2.5-VL 3B | ~10GB |
+| Qwen2.5-VL 7B (4-bit) | ~9GB |
+| Qwen2.5-VL 7B (8-bit) | ~12GB |
+| JoyCaption (BF16) | ~14GB (requires 16GB+ GPU) |
+| JoyCaption (8-bit) | ~10GB (requires 12GB+ GPU) |
+| WD14 ONNX | ~1GB |
 | BiRefNet | ~4GB |
 | Spandrel Upscaler | ~2-4GB |
 | MobileSAM | ~1GB |
